@@ -34,6 +34,9 @@
   </div>
 </main>
 
+<div class="engbar" role="radiogroup" aria-label="Motor de voz">
+  <span>Motor</span><button data-e="google">Google</button><button data-e="local">Local</button>
+</div>
 <footer>
   <button id="btnClear" class="fbtn" aria-label="Borrar todo">Borrar</button>
   <button id="btnMic" class="mic" aria-label="Escuchar" disabled><span>聴</span></button>
@@ -72,6 +75,11 @@
     <label class="row"><span>Partículas</span>
       <select id="particles"><option value="phonetic">は へ を → wa, e, o</option><option value="literal">は へ を → ha, he, wo</option></select></label>
     <h2 data-k="聴取">Escucha</h2>
+    <label class="row"><span>Motor de voz</span>
+      <select id="engine"><option value="google">Google (nube)</option><option value="local">Local (en el dispositivo)</option></select></label>
+    <p class="note" id="engineNote"></p>
+    <label class="row" id="shapeRow"><span>Ventana flotante</span>
+      <select id="pipShape"><option value="strip">Franja ancha</option><option value="wide">Panorámica 16:9</option><option value="square">Cuadrada</option><option value="tall">Vertical</option></select></label>
     <label class="chk"><input type="checkbox" id="continuous"><span>Sesión continua (si se repiten palabras o se corta, desmárcalo)</span></label>
     <label class="chk"><input type="checkbox" id="rawMic"><span>Micrófono sin cancelación de eco (necesario para oír lo que suena por el altavoz de este mismo equipo)</span></label>
     <label class="chk"><input type="checkbox" id="keepAwake"><span>Mantener la pantalla encendida mientras escucha</span></label>

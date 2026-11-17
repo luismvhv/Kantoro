@@ -4,7 +4,10 @@ Escucha japonés por el **micrófono** y lo muestra en **rōmaji** al momento, c
 
 ## Qué hace y con qué
 
-- **Voz → texto**: reconocimiento de voz del navegador (Web Speech API, `ja-JP`) directamente del micrófono. En Chrome usa el servicio de Google: **el audio sale del dispositivo** mientras escucha y hace falta conexión.
+- **Voz → texto**, con dos motores a elegir (botones «Google | Local» encima del sello):
+  - **Google**: reconocimiento de voz del navegador (Web Speech API, `ja-JP`). Más preciso, pero el audio sale del dispositivo, necesita conexión y, en Android, pausa los vídeos de otras apps cada vez que se reinicia.
+  - **Local**: [Vosk](https://alphacephei.com/vosk/) en WebAssembly con el modelo japonés pequeño (50 MB, se descarga la primera vez y queda guardado). Todo en el dispositivo, sin conexión y sin interrumpir otras apps; acierta menos que Google, sobre todo con música de fondo.
+- **Ventana flotante** (⧉): subtítulos encima de otras apps. En el ordenador se estira libremente; en el móvil se elige la forma en Ajustes y el tamaño se cambia pellizcándola.
 - **Texto → rōmaji y diccionario**: el mismo motor que la extensión (kuromoji + JMdict + KANJIDIC2), dentro de la página, en un Web Worker. No sale nada del dispositivo.
 - Texto provisional mientras se habla, que se confirma al acabar la frase; si la sesión se corta, lo provisional se conserva.
 - Ajustes: japonés debajo (kanji o kana), tamaño, vocales largas, partículas, pantalla siempre encendida, y un cuadro para escribir o pegar japonés.
@@ -45,4 +48,4 @@ Tras cambiar `ext/engine` o `ext/data`: `powershell -ExecutionPolicy Bypass -Fil
 
 ## Licencias
 
-JMdict y KANJIDIC2 © EDRDG (CC BY-SA 4.0). kuromoji.js (Apache 2.0) + IPADIC (licencia NAIST).
+JMdict y KANJIDIC2 © EDRDG (CC BY-SA 4.0). kuromoji.js (Apache 2.0) + IPADIC (licencia NAIST). vosk-browser (Apache 2.0) y modelo vosk-model-small-ja-0.22 de Alpha Cephei (Apache 2.0).

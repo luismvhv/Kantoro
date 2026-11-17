@@ -3,7 +3,7 @@
  * · Diccionarios (kuromoji-dict/ y data/, ~34 MB): se guardan la primera vez que se piden y no se vuelven a descargar.
  * Sube SHELL_V al publicar una versión nueva; DATA_V solo si cambian los diccionarios. */
 'use strict';
-const SHELL_V = 'kantoro-shell-v2';
+const SHELL_V = 'kantoro-shell-v3';
 const DATA_V = 'kantoro-data-v1';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'engine-worker.js', 'manifest.webmanifest',
   'engine/romaji.js', 'engine/dict.js', 'engine/analyzer.js', 'lib/kuromoji.js', 'icons/192.png', 'icons/512.png'];
@@ -17,6 +17,8 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const req = e.request, u = new URL(req.url);
   if (req.method !== 'GET' || u.origin !== self.location.origin) return;
+  // El modelo de voz local (50 MB) lo guarda el propio reconocedor (IndexedDB): no se duplica aquí
+  if (/\/models\//.test(u.pathname)) return;
   if (/\/(kuromoji-dict|data)\//.test(u.pathname)) {
     e.respondWith(caches.open(DATA_V).then(async (c) => {
       const hit = await c.match(req);

@@ -117,3 +117,9 @@ output { color: var(--muted); font-size: 12px; }
   border: 1px solid rgba(201, 162, 74, .6); border-radius: 3px; padding: 10px 14px; font-size: 14px; box-shadow: 0 8px 30px rgba(0, 0, 0, .4); }
 
 @media (min-width: 760px) { main { padding-top: 22px; } .ph .ro { font-size: calc(27px * var(--fs)); } }
+
+/* Selector de motor de voz, encima de la barra inferior */
+.engbar { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 12px 4px; font-size: 13px; color: var(--muted); background: var(--washi-2); border-top: 1px solid var(--line); }
+.engbar button { background: transparent; border: 1px solid var(--line-2); border-radius: 3px; padding: 4px 12px; font-weight: 700; font-size: 13px; color: var(--muted); }
+.engbar button.on { background: var(--ai); border-color: var(--ai); color: #f7f0dc; box-shadow: inset 0 -2px 0 var(--kin); }
+footer { border-top: 0; }
