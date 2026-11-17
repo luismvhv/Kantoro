@@ -104,6 +104,7 @@ ol { margin: 2px 0 0; padding-left: 22px; } li { margin: 3px 0; }
 /* Controles de ajustes */
 .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 9px 0; }
 .row select, .row input[type=range] { flex: 0 0 56%; width: 56%; }
+.row input[type=password] { flex: 0 0 56%; width: 56%; min-width: 0; background: #fbf6e8; border: 1px solid var(--line-2); border-radius: 2px; padding: 8px; font-family: monospace; font-size: 14px; }
 select, textarea { background: #fbf6e8; border: 1px solid var(--line-2); border-radius: 2px; padding: 8px; }
 textarea { width: 100%; font-family: var(--mincho); font-size: 16px; resize: vertical; }
 input[type=range], input[type=checkbox] { accent-color: var(--shu); }

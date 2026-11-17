@@ -1,7 +1,7 @@
 /* Kantoro (web app) — escucha japonés por el micrófono y lo muestra en rōmaji, con diccionario al tocar.
  * Reconocimiento: Web Speech API del navegador (micrófono). Análisis: el motor de la extensión, en un Web Worker. */
 'use strict';
-const VERSION = '0.3.2';
+const VERSION = '0.4.0';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ANDROID = /Android/i.test(navigator.userAgent);
@@ -19,6 +19,12 @@ const DEFAULTS = {
   // En Android el de Google pausa los vídeos de otras apps en cada reinicio, así que allí se empieza con el local.
   engine: ANDROID ? 'local' : 'google',
   pipShape: 'strip',      // forma de la ventana flotante en el móvil: strip | wide | square | tall
+  // Con el motor Google: 'browser' = reconocedor del navegador (gratis; en Android es el del sistema, que pausa otras
+  // apps y no escucha con Kantoro en segundo plano) | 'cloud' = Google Cloud Speech-to-Text con la clave del usuario
+  // (micrófono propio de la app: sigue escuchando fuera de ella y no toca el audio de Crunchyroll) | 'auto' = cloud en
+  // Android si hay clave, si no el del navegador.
+  gBackend: 'auto', gkey: '', gInterim: true,
+  gUse: null,             // { m: 'AAAA-MM', s: segundos enviados este mes } (estimación del consumo)
 };
 let S = { ...DEFAULTS };
 try { S = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('kantoro.settings') || '{}') }; } catch (_) { /* ajustes por defecto */ }
@@ -159,7 +165,8 @@ const listener = {
   // Con S.rawMic el micrófono se abre SIN cancelación de eco ni supresión de ruido y se entrega al reconocedor
   // como pista: si no, el navegador elimina precisamente el sonido que sale por el altavoz del propio equipo.
   async start(mode = 'mic') {
-    this.engine = S.engine === 'local' ? 'local' : 'google';
+    this.engine = S.engine === 'local' ? 'local' : useCloud() ? 'cloud' : 'google';
+    this.fallback = null; this.bad = 0;
     if (this.engine === 'google') {
       const SR = self.SpeechRecognition || self.webkitSpeechRecognition;
       if (!SR) { this.fatal('no-api'); toast('Este navegador no tiene el reconocimiento de Google: usa el motor «Local».', 7000); return; }
@@ -175,66 +182,72 @@ const listener = {
         if (!at) { st.getTracks().forEach((t) => t.stop()); toast('No se ha compartido el audio: elige una pestaña y marca «Compartir también el audio de la pestaña».', 8000); return; }
         this.stream = st; this.track = at;
         at.addEventListener('ended', () => { if (this.on) this.stop(); });
-      } else if ((this.engine === 'local' || S.rawMic) && md && md.getUserMedia) {
+      } else if ((this.engine !== 'google' || S.rawMic) && md && md.getUserMedia) {
         // sin cancelación de eco: si no, se elimina el sonido que sale por el altavoz del propio equipo
-        this.stream = await md.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: this.engine === 'local', channelCount: 1 } });
+        this.stream = await md.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: this.engine !== 'google', channelCount: 1 } });
         this.track = this.stream.getAudioTracks()[0] || null;
       }
     } catch (e) {
       if (mode === 'tab') { toast('No se ha compartido nada.'); return; }
       if (e && e.name === 'NotAllowedError') { this.fatal('not-allowed'); return; }
-      if (this.engine === 'local') { this.fatal('audio-capture'); return; }
+      if (this.engine !== 'google') { this.fatal('audio-capture'); return; }
       this.stream = null; this.track = null; // sin acceso directo: micrófono normal del reconocedor
     }
     this.on = true; this.fail = 0; this.netRetry = false;
     ui.listening(true);
     if (this.engine === 'local') { localEng.start(this.track); return; }
+    if (this.engine === 'cloud') { cloudEng.start(this.track); return; }
     this.meterStart();
     this.spawn();
   },
   release() {
-    localEng.stop();
+    localEng.stop(); cloudEng.stop();
     clearInterval(this.meterIv); this.meterIv = 0;
     if (this.actx) { this.actx.close().catch(() => {}); this.actx = null; }
     if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
     this.track = null;
   },
   stop() {
-    this.on = false; this.bg = false;
+    this.on = false; this.fallback = null;
     try { this.rec && this.rec.stop(); } catch (_) { /* ya parado */ }
     this.release();
     ui.listening(false);
   },
-  // Android: el reconocedor de Google (el del sistema) se corta cuando Kantoro pasa a segundo plano y, cada vez que
-  // arranca, quita el foco de audio a la app que esté sonando (Crunchyroll se pausa). Desde una web no se puede
-  // evitar, así que mientras Kantoro no está en primer plano se pasa al motor local, que escucha el micrófono sin
-  // tocar el audio de otras apps; al volver a Kantoro se retoma Google.
-  async toBackground() {
-    if (!ANDROID || !this.on || this.engine !== 'google' || this.bg) return;
-    this.bg = true;
+  // El motor elegido es el que manda: solo si Google no funciona tras varios intentos (o la clave de Google Cloud es
+  // rechazada) se pasa al motor local durante esta escucha, y se explica por qué.
+  async fallbackLocal(reason, detail) {
+    if (!this.on || this.engine === 'local') return;
+    const was = this.engine;
+    this.engine = 'local'; this.fallback = reason;
     try { this.rec && this.rec.abort(); } catch (_) { /* nada */ }
+    this.rec = null;
+    cloudEng.stop();
+    clearInterval(this.meterIv); this.meterIv = 0;
+    if (this.actx) { this.actx.close().catch(() => {}); this.actx = null; }
     if (this.interim) { onSpeech('final', this.interim); this.interim = ''; }
     onSpeech('interim', '');
+    const msg = (FALLBACK_MSG[reason] || FALLBACK_MSG.google) + (detail ? ' (' + detail + ')' : '');
+    toast(msg, 12000); pip.notify(was === 'cloud' ? 'Google Cloud no responde: ahora escucha el motor local' : 'Google no escucha fuera de Kantoro: ahora escucha el motor local');
     try {
       if (!this.track) {
         this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 } });
         this.track = this.stream.getAudioTracks()[0] || null;
       }
-    } catch (_) { this.bg = false; this.spawn(); return; } // sin micrófono propio: se sigue con Google
-    if (!this.bg || !this.on) { this.release(); return; } // ya ha vuelto a primer plano
-    this.engine = 'local';
+    } catch (_) { this.fatal('audio-capture'); return; }
+    if (!this.on || this.engine !== 'local') return;
     localEng.start(this.track);
-  },
-  toForeground() {
-    if (!this.bg) return;
-    this.bg = false;
-    this.release(); // cierra el motor local (lo que estaba en curso se confirma) y el micrófono propio
-    this.engine = 'google'; this.fail = 0; this.level = -1;
-    if (this.on) this.spawn();
     this.paint();
   },
+  // Si el relevo fue porque el reconocedor del navegador no escucha en segundo plano, al volver a Kantoro se retoma Google
+  toForeground() {
+    if (!this.on || this.fallback !== 'bg') return;
+    this.release();
+    this.engine = 'google'; this.fallback = null; this.fail = 0; this.bad = 0; this.level = -1;
+    toast('De vuelta en Kantoro: se retoma el reconocedor de Google.', 3500);
+    this.spawn(); this.paint();
+  },
   fatal(code) {
-    this.on = false; this.bg = false;
+    this.on = false; this.fallback = null;
     try { this.rec && this.rec.abort(); } catch (_) { /* nada */ }
     this.release();
     ui.listening(false);
@@ -262,7 +275,8 @@ const listener = {
     if (!this.on) return;
     const l = this.level;
     const bars = l < 0 ? '' : ' · nivel ' + (l > 0.06 ? '▮▮▮▮' : l > 0.02 ? '▮▮▮▯' : l > 0.006 ? '▮▮▯▯' : l > 0.0015 ? '▮▯▯▯' : '▯▯▯▯');
-    let txt = `${this.bg ? 'Local (segundo plano)' : this.engine === 'local' ? 'Local' : 'Google'} ·${this.mode === 'tab' ? 'pestaña' : 'micrófono'}${bars} · ${this.results ? this.results + ' resultados' : this.heard || 'esperando voz'}`;
+    const name = this.engine === 'cloud' ? 'Google Cloud' : this.engine === 'google' ? 'Google' : this.fallback ? 'Local (Google no disponible)' : 'Local';
+    let txt = `${name} ·${this.mode === 'tab' ? 'pestaña' : 'micrófono'}${bars} · ${this.results ? this.results + ' resultados' : this.heard || 'esperando voz'}`;
     let cls = 'live';
     if (!this.results && l >= 0 && l < 0.0015 && this.starts > 1) { txt = this.mode === 'tab' ? 'No llega sonido de lo compartido: ¿marcaste «Compartir también el audio»?' : 'El micrófono no capta sonido: revisa cuál es el micrófono del equipo y su volumen.'; cls = 'err'; }
     else if (!this.results && this.noSpeech >= 2) { txt += ' — el reconocedor no distingue voz' + (this.mode === 'mic' && !this.track ? ': sube el volumen o acerca el micrófono al altavoz' : ''); }
@@ -270,13 +284,16 @@ const listener = {
     setStatus(txt, cls);
   },
   spawn() {
-    if (!this.on || this.bg) return;
+    if (!this.on || this.engine !== 'google') return;
     const r = new this.SR();
     this.rec = r; this.starts++;
     r.lang = 'ja-JP'; r.continuous = !!S.continuous; r.interimResults = true; r.maxAlternatives = 1;
-    let upTo = 0, lastFinal = '';
+    let upTo = 0, lastFinal = '', got = false, err = '';
+    const t0 = Date.now();
     this.interim = '';
     r.onresult = (e) => {
+      if (this.rec !== r) return;
+      got = true; this.bad = 0;
       this.fail = 0; this.results++; this.paint();
       let interim = '';
       for (let i = 0; i < e.results.length; i++) {
@@ -299,27 +316,35 @@ const listener = {
     r.onsoundstart = () => { this.heard = 'sonido detectado'; this.paint(); };
     r.onspeechstart = () => { this.heard = 'voz detectada'; this.paint(); };
     r.onerror = (e) => {
-      if (!this.on || this.bg) return;
-      this.lastErr = e.error;
+      if (!this.on || this.rec !== r) return;
+      this.lastErr = err = e.error;
       if (e.error === 'no-speech') { this.noSpeech++; this.paint(); return; }
       // Sin acceso a Google con la pista propia: se prueba una vez con el micrófono normal del reconocedor
       if (e.error === 'network' && this.track && this.mode === 'mic' && !this.results && !this.netRetry) { this.netRetry = true; this.release(); this.level = -1; return; }
-      if (e.error === 'network' && !this.results) { this.fatal('network'); return; }
-      if (['not-allowed', 'service-not-allowed', 'audio-capture', 'language-not-supported'].includes(e.error)) { this.fatal(e.error); return; }
-      if (++this.fail >= 5) this.fatal(e.error);
+      if (e.error === 'network' && !this.results) { this.fallbackLocal('network'); return; }
+      if (['not-allowed', 'audio-capture'].includes(e.error)) { this.fatal(e.error); return; }
+      if (['service-not-allowed', 'language-not-supported'].includes(e.error)) { this.fallbackLocal('google', e.error); return; }
+      if (++this.fail >= 5) this.fallbackLocal('google', e.error);
     };
     r.onend = () => {
+      if (this.rec !== r) return;
       // lo que estaba "en curso" y no llegó a confirmarse no se pierde
       if (this.interim) { onSpeech('final', this.interim); this.interim = ''; }
       onSpeech('interim', '');
-      if (this.on) setTimeout(() => this.spawn(), this.fail ? Math.min(2000, 400 * this.fail) : 0);
+      if (!this.on || this.engine !== 'google') return;
+      // Sesiones que no sirven: con Kantoro en segundo plano (Android corta el reconocedor del navegador), o que acaban
+      // al instante o con error. Tras varias seguidas se pasa al local y se explica por qué.
+      const hidden = document.visibilityState === 'hidden';
+      if (!got && (hidden || (err && err !== 'no-speech') || Date.now() - t0 < 1200)) this.bad++;
+      if (this.bad >= (hidden ? 2 : 4)) { this.fallbackLocal(hidden ? 'bg' : 'google', err); return; }
+      setTimeout(() => this.spawn(), this.fail ? Math.min(2000, 400 * this.fail) : 0);
     };
     try { if (this.track) r.start(this.track); else r.start(); }
     catch (err) {
       // este navegador no admite reconocer una pista de audio: se vuelve al micrófono normal del reconocedor
       if (this.track && this.mode === 'mic') { this.release(); this.level = -1; setTimeout(() => this.spawn(), 50); return; }
       // p. ej. la sesión anterior aún no ha terminado de cerrarse
-      if (++this.fail >= 5) this.fatal(String(err.name || err)); else setTimeout(() => this.spawn(), 300);
+      if (++this.fail >= 5) this.fallbackLocal('google', String(err.name || err)); else setTimeout(() => this.spawn(), 300);
     }
   },
 };
@@ -403,6 +428,158 @@ const localEng = {
   },
 };
 
+// ───────────── Google Cloud Speech-to-Text (con la clave del usuario) ─────────────
+// El reconocedor del navegador en Android es el del sistema: pide el foco de audio (pausa Crunchyroll) y deja de
+// escuchar cuando Kantoro no está delante. Este motor no lo usa: la app abre su propio micrófono (como el motor
+// local, que no toca el audio de otras apps), corta el audio en frases por los silencios y envía cada frase a la API
+// de Google. Así funciona con Kantoro en segundo plano o en la ventana flotante. La clave se guarda solo en este
+// dispositivo y solo se envía a speech.googleapis.com.
+const useCloud = () => !!S.gkey && (S.gBackend === 'cloud' || (S.gBackend === 'auto' && ANDROID));
+const FALLBACK_MSG = {
+  bg: 'El reconocedor de Google del navegador no escucha con Kantoro en segundo plano en Android, así que se ha pasado al motor local. Al volver a Kantoro se retoma Google. Para usar Google también fuera de la app, pon una clave de Google Cloud en Ajustes.',
+  google: 'El reconocedor de Google no funciona en este momento (varios intentos fallidos), así que se ha pasado al motor local.',
+  network: 'No hay acceso al reconocedor de Google desde este navegador o esta red, así que se ha pasado al motor local.',
+  'cloud-key': 'Google Cloud ha rechazado la clave, así que se ha pasado al motor local. Revisa la clave en Ajustes',
+  'cloud-net': 'Google Cloud no responde (sin conexión o demasiados fallos seguidos), así que se ha pasado al motor local.',
+};
+const CLOUD_URL = 'https://speech.googleapis.com/v1/speech:recognize?key=';
+const FR = 320;                 // trama de 20 ms a 16 kHz
+const SIL_END = 18;             // 360 ms de silencio cierran la frase
+const MAX_FR = 300;             // frases de más de 6 s se cortan por el punto más silencioso del último segundo y medio
+function b64(i16) {
+  const u8 = new Uint8Array(i16.buffer, i16.byteOffset, i16.byteLength);
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function addUse(sec) {
+  const m = new Date().toISOString().slice(0, 7);
+  if (!S.gUse || S.gUse.m !== m) S.gUse = { m, s: 0 };
+  S.gUse.s += sec;
+  clearTimeout(addUse.t); addUse.t = setTimeout(save, 3000);
+}
+const cloudEng = {
+  ctx: null, src: null, proc: null, run: 0,
+  start(track) {
+    if (!track) { listener.fatal('audio-capture'); return; }
+    const AC = self.AudioContext || self.webkitAudioContext;
+    this.ctx = new AC();
+    if (this.ctx.state !== 'running') this.ctx.resume().catch(() => {});
+    this.step = this.ctx.sampleRate / 16000;
+    this.acc = 0; this.accN = 0; this.pos = 0; this.cur = new Int16Array(FR); this.curE = 0; this.curN = 0;
+    this.hist = []; this.pre = []; this.seg = null; this.run = 0; this.segId = 0;
+    this.out = []; this.fails = 0; this.liveId = 0; this.liveReq = 0; this.reqN = 0; this.lastPaint = 0;
+    this.src = this.ctx.createMediaStreamSource(new MediaStream([track]));
+    this.proc = this.ctx.createScriptProcessor(2048, 1, 1);
+    this.proc.onaudioprocess = (ev) => this.feed(ev.inputBuffer.getChannelData(0));
+    // a un destino de flujo, no a los altavoces: procesa sin reproducir nada
+    this.src.connect(this.proc); this.proc.connect(this.ctx.createMediaStreamDestination());
+    listener.heard = 'micrófono abierto'; listener.paint();
+  },
+  // Reducción a 16 kHz (media de cada intervalo) y tramas de 20 ms
+  feed(d) {
+    let e = 0;
+    for (let i = 0; i < d.length; i++) {
+      this.acc += d[i]; this.accN++; this.pos++;
+      if (this.pos >= this.step) {
+        this.pos -= this.step;
+        const v = Math.max(-1, Math.min(1, this.acc / this.accN));
+        this.acc = 0; this.accN = 0;
+        this.cur[this.curN++] = v * 32767; this.curE += v * v;
+        if (this.curN === FR) { this.frame(this.cur, Math.sqrt(this.curE / FR)); this.cur = new Int16Array(FR); this.curN = 0; this.curE = 0; }
+      }
+      if ((i & 3) === 0) e += d[i] * d[i];
+    }
+    listener.level = Math.sqrt(e / (d.length / 4));
+    const now = Date.now();
+    if (now - this.lastPaint > 400) { this.lastPaint = now; listener.paint(); }
+  },
+  // Detección de voz: umbral relativo al ruido de fondo (percentil 20 de los últimos 3 s), bajo a propósito: es
+  // preferible enviar algo de música a perder una palabra
+  frame(pcm, rms) {
+    this.hist.push(rms); if (this.hist.length > 150) this.hist.shift();
+    if (this.hist.length % 10 === 0 || !this.floor) { const s = this.hist.slice().sort((a, b) => a - b); this.floor = s[Math.floor(s.length * 0.2)]; }
+    const voiced = rms > Math.max(0.0035, this.floor * 1.7);
+    const seg = this.seg;
+    if (!seg) {
+      this.pre.push({ pcm, rms }); if (this.pre.length > 15) this.pre.shift(); // 300 ms antes de la voz
+      this.run = voiced ? this.run + 1 : 0;
+      if (this.run >= 3) { this.seg = { id: ++this.segId, fr: this.pre.splice(0), voiced: 3, sil: 0, lastI: Date.now(), busy: false }; listener.heard = 'voz detectada'; }
+      return;
+    }
+    seg.fr.push({ pcm, rms });
+    if (voiced) { seg.voiced++; seg.sil = 0; } else seg.sil++;
+    if (seg.sil >= SIL_END) { seg.fr.length -= Math.max(0, seg.sil - 10); this.close(seg.fr); return; }
+    if (seg.fr.length >= MAX_FR) {
+      let cut = seg.fr.length - 1, min = Infinity;
+      for (let i = seg.fr.length - 75; i < seg.fr.length; i++) if (seg.fr[i].rms < min) { min = seg.fr[i].rms; cut = i; }
+      const tail = seg.fr.splice(cut);
+      this.close(seg.fr);
+      this.seg = { id: ++this.segId, fr: tail, voiced: tail.length, sil: 0, lastI: Date.now(), busy: false };
+      return;
+    }
+    if (S.gInterim && !seg.busy && seg.fr.length >= 50 && Date.now() - seg.lastI >= 1000) {
+      seg.lastI = Date.now(); seg.busy = true;
+      const id = seg.id, n = ++this.reqN;
+      this.recognize(seg.fr).then((t) => {
+        seg.busy = false;
+        if (this.seg === seg && t && n > this.liveReq) { this.liveReq = n; this.liveId = id; onSpeech('interim', t); }
+      }, () => { seg.busy = false; });
+    }
+  },
+  // Frase terminada: se reconoce y se entrega en orden (aunque las respuestas lleguen desordenadas)
+  close(fr) {
+    const seg = this.seg; this.seg = null; this.run = 0;
+    if (!seg || seg.voiced < 8) return; // menos de 160 ms de sonido: ruido
+    const item = { id: seg.id, done: false, text: '' };
+    this.out.push(item);
+    const go = (retry) => this.recognize(fr).then((t) => { item.text = t; item.done = true; this.flush(); },
+      (err) => { if (retry && err && err.retry) setTimeout(() => go(false), 600); else { item.done = true; this.flush(); } });
+    go(true);
+  },
+  flush() {
+    while (this.out.length && this.out[0].done) {
+      const it = this.out.shift();
+      if (it.text) { listener.results++; onSpeech('final', it.text); }
+      if (this.liveId === it.id || (it.text && this.liveId < it.id)) { this.liveId = 0; onSpeech('interim', ''); }
+    }
+    listener.paint();
+  },
+  async recognize(fr) {
+    const pcm = new Int16Array(fr.length * FR);
+    fr.forEach((f, i) => pcm.set(f.pcm, i * FR));
+    addUse(Math.ceil(pcm.length / 16000));
+    const body = { config: { encoding: 'LINEAR16', sampleRateHertz: 16000, languageCode: 'ja-JP', enableAutomaticPunctuation: true, maxAlternatives: 1 }, audio: { content: b64(pcm) } };
+    let res, j;
+    try {
+      res = await fetch(CLOUD_URL + encodeURIComponent(S.gkey), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      j = await res.json().catch(() => ({}));
+    } catch (_) {
+      if (++this.fails >= 4) listener.fallbackLocal('cloud-net');
+      const e = new Error('red'); e.retry = true; throw e;
+    }
+    if (!res.ok) {
+      const msg = (j && j.error && j.error.message) || ('HTTP ' + res.status);
+      listener.lastErr = msg;
+      if (res.status === 400 || res.status === 401 || res.status === 403) { listener.fallbackLocal('cloud-key', msg); throw new Error(msg); }
+      if (++this.fails >= 4) listener.fallbackLocal('cloud-net', msg);
+      const e = new Error(msg); e.retry = res.status >= 500 || res.status === 429; throw e;
+    }
+    this.fails = 0;
+    return (j.results || []).map((r) => (r.alternatives && r.alternatives[0] && r.alternatives[0].transcript) || '').join('').trim();
+  },
+  stop() {
+    if (!this.proc) return;
+    // lo que se estaba diciendo también se envía (salvo si Google Cloud acaba de fallar); las respuestas pendientes
+    // se siguen entregando
+    if (this.seg && !listener.fallback) this.close(this.seg.fr);
+    this.proc.onaudioprocess = null;
+    try { this.proc.disconnect(); this.src.disconnect(); } catch (_) { /* nada */ }
+    this.proc = null; this.seg = null;
+    if (this.ctx) { this.ctx.close().catch(() => {}); this.ctx = null; }
+  },
+};
+
 // Frases que no se cierran: se fuerza el cierre para que pasen a confirmadas (y se traduzcan)
 setInterval(() => {
   if (listener.on && listener.rec && listener.engine === 'google' && listener.interim.length > 60) { try { listener.rec.stop(); } catch (_) { /* nada */ } }
@@ -442,7 +619,10 @@ const pip = {
     const [w, h] = PIP_SHAPES[S.pipShape];
     this.canvas.width = w; this.canvas.height = h; this.draw();
   },
+  note: '', noteUntil: 0,
+  notify(text) { this.note = text; this.noteUntil = Date.now() + 8000; this.draw(); },
   lines() { // lo último confirmado (tenue) y lo que se está oyendo (vivo)
+    if (Date.now() < this.noteUntil) return [{ r: this.note, ja: 'Kantoro', live: true }];
     const out = [];
     const last = phrases[phrases.length - 1];
     const text = (ws) => ws.map((w) => (w.sp ? ' ' : '') + w.r).join('');
@@ -503,7 +683,7 @@ const pip = {
       try { await document.exitPictureInPicture(); } catch (_) { /* ya cerrada */ } return;
     }
     if (DOC_PIP) { try { await this.openDoc(); return; } catch (_) { /* se prueba con la ventana de vídeo */ } }
-    if (ANDROID && listener.on && listener.engine === 'google') { listener.toBackground(); toast('Fuera de Kantoro se escucha con el motor local: el de Google pausaría el vídeo. Al volver aquí se retoma Google.', 8000); }
+    const warnBg = ANDROID && S.engine !== 'local' && !useCloud();
     try {
       if (!this.canvas) {
         this.canvas = document.createElement('canvas');
@@ -519,7 +699,8 @@ const pip = {
       $('btnPip').classList.add('act');
       // el vídeo necesita fotogramas nuevos aunque el texto no cambie
       clearInterval(this.iv); this.iv = setInterval(() => this.draw(), 400);
-      if (!(ANDROID && listener.bg)) toast('Ventana flotante abierta. Pellízcala para cambiar su tamaño; la forma se elige en Ajustes.', 7000);
+      toast(warnBg ? 'Ventana flotante abierta. Ojo: el reconocedor de Google del navegador no escucha fuera de Kantoro en Android (y pausa otras apps). Para usar Google con Crunchyroll, pon tu clave de Google Cloud en Ajustes.'
+        : 'Ventana flotante abierta. Pellízcala para cambiar su tamaño; la forma se elige en Ajustes.', warnBg ? 12000 : 7000);
     } catch (e) {
       this.on = false;
       toast('Este navegador no ha permitido abrir la ventana flotante (' + (e && e.name || 'error') + ').', 7000);
@@ -542,7 +723,7 @@ const ui = {
   },
 };
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') listener.toBackground(); else listener.toForeground();
+  if (document.visibilityState === 'visible') listener.toForeground();
   // al volver a la app se recupera el bloqueo de pantalla; al salir, el navegador corta el micrófono
   if (document.visibilityState === 'visible' && listener.on && S.keepAwake && navigator.wakeLock) navigator.wakeLock.request('screen').then((w) => { wakeLock = w; }, () => {});
 });
@@ -644,7 +825,14 @@ function fillSettings() {
   $('shapeRow').hidden = DOC_PIP; // en el ordenador la ventana se estira libremente
   $('engineNote').textContent = S.engine === 'local'
     ? 'Local: reconoce en el propio dispositivo con Vosk (modelo japonés de 50 MB que se descarga la primera vez y queda guardado). Funciona sin conexión y no interrumpe otras apps, pero acierta menos que Google, sobre todo con música de fondo.'
-    : 'Google: más preciso, pero envía el audio a Google y necesita conexión. En Android pausa los vídeos de otras apps cada vez que se reinicia.';
+    : 'Google: más preciso, pero envía el audio a Google y necesita conexión.';
+  $('gBlock').hidden = S.engine === 'local';
+  $('gBackend').value = S.gBackend; $('gkey').value = S.gkey || ''; $('gInterim').checked = !!S.gInterim;
+  const used = S.gUse && S.gUse.m === new Date().toISOString().slice(0, 7) ? S.gUse.s : 0;
+  $('gNote').innerHTML = (useCloud()
+    ? '<b>Ahora: Google Cloud.</b> Kantoro escucha con su propio micrófono y envía cada frase a Google: sigue funcionando en la ventana flotante y con la app en segundo plano, sin pausar Crunchyroll.'
+    : '<b>Ahora: reconocedor del navegador.</b>' + (ANDROID ? ' En Android es el del sistema: pausa el vídeo de otras apps al arrancar y deja de escuchar fuera de Kantoro (entonces se pasa al motor local y se avisa). Para usar Google con Crunchyroll, pon una clave de Google Cloud.' : ''))
+    + ` Google Cloud: 60 min gratis al mes y después de pago (consulta la tarifa de Speech-to-Text). Enviado este mes desde este dispositivo: <b>${(used / 60).toFixed(1)} min</b>. La clave se guarda solo aquí y solo se envía a speech.googleapis.com; restríngela en la consola de Google a la API Speech-to-Text y a este sitio web.`;
   paintEngine();
 }
 function paintEngine() {
@@ -659,13 +847,25 @@ const ICON_DISK = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" s
 function setEngine(e) {
   if (e === S.engine) return;
   S.engine = e; save(); paintEngine();
-  toast(e === 'local' ? 'Cambiado a modo local: el audio se reconoce en este dispositivo.' : 'Cambiado a modo API de Google: el audio se envía al servicio de Google.', 3500);
+  toast(e === 'local' ? 'Cambiado a modo local: el audio se reconoce en este dispositivo.'
+    : useCloud() ? 'Cambiado a modo API de Google (Google Cloud): el audio se envía a Google y sigue funcionando fuera de la app.'
+    : 'Cambiado a modo API de Google: el audio se envía al servicio de Google.' + (ANDROID ? ' Sin clave de Google Cloud, solo escucha con Kantoro delante.' : ''), ANDROID && e !== 'local' && !useCloud() ? 7000 : 3500);
   if (e === 'local') localEng.load().catch(() => {}); // empieza a descargar el modelo ya
   if (listener.on) { const m = listener.mode; listener.stop(); listener.start(m); }
 }
 $('btnEngine').addEventListener('click', () => setEngine(S.engine === 'local' ? 'google' : 'local'));
 $('engine').addEventListener('change', (e) => { setEngine(e.target.value); fillSettings(); });
 $('pipShape').addEventListener('change', (e) => pip.setShape(e.target.value));
+// Cambios del reconocedor de Google: si está escuchando, se reinicia con el nuevo
+const restartIfOn = () => { if (listener.on) { const m = listener.mode; listener.stop(); listener.start(m); } };
+$('gBackend').addEventListener('change', (e) => { S.gBackend = e.target.value; save(); fillSettings(); restartIfOn(); });
+$('gkey').addEventListener('change', (e) => {
+  S.gkey = e.target.value.trim(); save(); fillSettings();
+  if (S.gkey && !useCloud()) toast('Clave guardada. En este equipo se usa el reconocedor del navegador; elige «Google Cloud» para usarla también aquí.', 7000);
+  else if (S.gkey) toast('Clave guardada: el motor Google usará Google Cloud.', 4000);
+  restartIfOn();
+});
+$('gInterim').addEventListener('change', (e) => { S.gInterim = e.target.checked; save(); });
 paintEngine();
 $('btnSettings').addEventListener('click', () => { fillSettings(); $('settings').hidden = false; });
 for (const id of ['showOriginal', 'translate', 'continuous', 'keepAwake', 'rawMic']) {

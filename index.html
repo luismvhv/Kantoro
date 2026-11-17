@@ -76,6 +76,13 @@
     <label class="row"><span>Motor de voz</span>
       <select id="engine"><option value="google">Google (nube)</option><option value="local">Local (en el dispositivo)</option></select></label>
     <p class="note" id="engineNote"></p>
+    <div id="gBlock">
+      <label class="row"><span>Reconocedor de Google</span>
+        <select id="gBackend"><option value="auto">Automático (en el móvil, Google Cloud si hay clave)</option><option value="browser">El del navegador (gratis)</option><option value="cloud">Google Cloud Speech-to-Text (tu clave)</option></select></label>
+      <label class="row"><span>Clave de API de Google Cloud</span><input type="password" id="gkey" autocomplete="off" spellcheck="false" placeholder="AIza…"></label>
+      <label class="chk"><input type="checkbox" id="gInterim"><span>Texto provisional mientras se habla con Google Cloud (consume unas 2–3 veces más minutos)</span></label>
+      <p class="note" id="gNote"></p>
+    </div>
     <label class="row" id="shapeRow"><span>Ventana flotante</span>
       <select id="pipShape"><option value="strip">Franja ancha</option><option value="wide">Panorámica 16:9</option><option value="square">Cuadrada</option><option value="tall">Vertical</option></select></label>
     <label class="chk"><input type="checkbox" id="continuous"><span>Sesión continua (si se repiten palabras o se corta, desmárcalo)</span></label>
