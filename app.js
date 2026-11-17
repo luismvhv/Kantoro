@@ -1,7 +1,7 @@
 /* Kantoro (web app) — escucha japonés por el micrófono y lo muestra en rōmaji, con diccionario al tocar.
  * Reconocimiento: Web Speech API del navegador (micrófono). Análisis: el motor de la extensión, en un Web Worker. */
 'use strict';
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ANDROID = /Android/i.test(navigator.userAgent);
@@ -24,7 +24,8 @@ const DEFAULTS = {
   // (micrófono propio de la app: sigue escuchando fuera de ella y no toca el audio de Crunchyroll) | 'auto' = cloud en
   // Android si hay clave, si no el del navegador.
   gBackend: 'auto', gkey: '', gInterim: true,
-  gUse: null,             // { m: 'AAAA-MM', s: segundos enviados este mes } (estimación del consumo)
+  localGate: true,        // motor local: solo procesa cuando hay sonido por encima del ruido de fondo
+  gUse: null,            // { m: 'AAAA-MM', s: segundos enviados este mes } (estimación del consumo)
 };
 let S = { ...DEFAULTS };
 try { S = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('kantoro.settings') || '{}') }; } catch (_) { /* ajustes por defecto */ }
@@ -158,6 +159,27 @@ const SR_ERR = {
   'local-load': 'No se pudo cargar el reconocedor local: la primera vez hace falta conexión para descargar el modelo (50 MB) y memoria libre en el dispositivo.',
   'no-api': 'Este navegador no incluye reconocimiento de voz. Usa Chrome (Android o escritorio) o Safari reciente.',
 };
+// Micrófono propio de la app, en crudo: sin cancelación de eco, sin supresión de ruido y sin control de ganancia
+// del navegador. Con cualquiera de ellos activo, Chrome pasa el audio por su procesador de llamadas (más trabajo para
+// el móvil y, en Android, puede poner el sistema en modo comunicación, lo que cambia cómo suenan las otras apps).
+// La ganancia la pone el motor local. Si el micrófono por defecto es el de unos auriculares Bluetooth, se usa el del
+// móvil: abrir el micrófono Bluetooth pasa los auriculares al perfil de llamada y el sonido del vídeo se degrada.
+async function openMic(agc) {
+  const base = { echoCancellation: false, noiseSuppression: false, autoGainControl: !!agc, channelCount: 1 };
+  let st = await navigator.mediaDevices.getUserMedia({ audio: base });
+  try {
+    const t = st.getAudioTracks()[0], BT = /bluetooth|\bbt\b|\bsco\b/i;
+    const all = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput');
+    if (t && (BT.test(t.label) || (/default|predeterminado/i.test(t.label) && all.some((d) => BT.test(d.label))))) {
+      const devs = all.filter((d) => d.deviceId !== 'default' && d.label && !BT.test(d.label));
+      if (devs.length) {
+        st.getTracks().forEach((x) => x.stop());
+        st = await navigator.mediaDevices.getUserMedia({ audio: { ...base, deviceId: { exact: devs[0].deviceId } } });
+      }
+    }
+  } catch (_) { /* se queda con el que hay */ }
+  return st;
+}
 const listener = {
   on: false, rec: null, fail: 0, interim: '', lastFinalAt: 0, starts: 0, results: 0,
   mode: 'mic', stream: null, track: null, level: -1, noSpeech: 0, heard: '', lastErr: '',
@@ -184,7 +206,7 @@ const listener = {
         at.addEventListener('ended', () => { if (this.on) this.stop(); });
       } else if ((this.engine !== 'google' || S.rawMic) && md && md.getUserMedia) {
         // sin cancelación de eco: si no, se elimina el sonido que sale por el altavoz del propio equipo
-        this.stream = await md.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: this.engine !== 'google', channelCount: 1 } });
+        this.stream = await openMic(this.engine === 'cloud');
         this.track = this.stream.getAudioTracks()[0] || null;
       }
     } catch (e) {
@@ -230,7 +252,7 @@ const listener = {
     toast(msg, 12000); pip.notify(was === 'cloud' ? 'Google Cloud no responde: ahora escucha el motor local' : 'Google no escucha fuera de Kantoro: ahora escucha el motor local');
     try {
       if (!this.track) {
-        this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 } });
+        this.stream = await openMic(false);
         this.track = this.stream.getAudioTracks()[0] || null;
       }
     } catch (_) { this.fatal('audio-capture'); return; }
@@ -351,7 +373,78 @@ const listener = {
 // ───────────── Motor local: Vosk (Kaldi en WebAssembly) con el modelo japonés pequeño ─────────────
 // No usa el reconocedor del navegador ni el de Android: el audio del micrófono se procesa en la propia página,
 // sin conexión (salvo la primera descarga del modelo, que queda guardado) y sin pedir el foco de audio del sistema.
-const VOSK_MODEL = 'models/vosk-model-small-ja-0.22.tar.gz';
+// Modelo con la búsqueda recortada (conf/model.conf: max-active 2500, beam 10, lattice-beam 2; original 7000/13/4):
+// en el PC gasta la mitad de procesador (0,185 frente a 0,379 del tiempo real, test/h_vosk.html) con el mismo texto
+const VOSK_MODEL = 'models/vosk-model-small-ja-0.22-lite.tar.gz';
+// ── Captura del micrófono para el motor local, lo más ligera posible ──
+// Entrega bloques de 16 kHz (la frecuencia del modelo: así Kaldi no tiene que remuestrear) de 200 ms con su nivel.
+// Orden de preferencia:
+//  1. 'directa': MediaStreamTrackProcessor lee el micrófono SIN AudioContext. No abre ninguna salida de audio en el
+//     sistema, así que no puede competir con el sonido de Crunchyroll.
+//  2. 'worklet': AudioContext a 16 kHz (el navegador remuestrea en código nativo) con búfer grande ('playback') y un
+//     AudioWorklet en el hilo de audio.
+//  3. 'script': ScriptProcessor (navegadores antiguos).
+const CHUNK = 3200;
+async function micTap(track, onChunk) {
+  // 1. directa
+  const want = S.capture || 'auto'; // 'auto' | 'worklet' | 'script' (para pruebas y diagnóstico)
+  if (want === 'auto' && self.MediaStreamTrackProcessor) {
+    try {
+      const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+      let buf = new Float32Array(CHUNK), n = 0, acc = 0, accN = 0, pos = 0, step = 0, tmp = null, alive = true;
+      const push = (v) => {
+        buf[n++] = v;
+        if (n === CHUNK) { let e = 0; for (let i = 0; i < CHUNK; i++) e += buf[i] * buf[i]; onChunk(buf, Math.sqrt(e / CHUNK)); buf = new Float32Array(CHUNK); n = 0; }
+      };
+      (async () => {
+        while (alive) {
+          const { value: ad, done } = await reader.read();
+          if (done || !ad) break;
+          try {
+            const len = ad.numberOfFrames;
+            if (!tmp || tmp.length < len) tmp = new Float32Array(len);
+            ad.copyTo(tmp, { planeIndex: 0, format: 'f32-planar' });
+            step = ad.sampleRate / 16000;
+            if (step === 1) for (let i = 0; i < len; i++) push(tmp[i]);
+            else for (let i = 0; i < len; i++) { acc += tmp[i]; accN++; if (++pos >= step) { pos -= step; push(acc / accN); acc = 0; accN = 0; } }
+          } finally { ad.close(); }
+        }
+      })().catch(() => {});
+      return { kind: 'directa', close() { alive = false; reader.cancel().catch(() => {}); } };
+    } catch (_) { /* se prueba con AudioContext */ }
+  }
+  const AC = self.AudioContext || self.webkitAudioContext;
+  let ctx;
+  try { ctx = new AC({ sampleRate: 16000, latencyHint: 'playback' }); } catch (_) { ctx = new AC(); }
+  if (ctx.state !== 'running') await ctx.resume().catch(() => {});
+  const src = ctx.createMediaStreamSource(new MediaStream([track]));
+  const sink = ctx.createMediaStreamDestination(); // no a los altavoces: procesa sin reproducir nada
+  // 2. worklet
+  if (want !== 'script' && ctx.audioWorklet && self.AudioWorkletNode) {
+    try {
+      await ctx.audioWorklet.addModule('mic-worklet.js');
+      const node = new AudioWorkletNode(ctx, 'kantoro-mic', { processorOptions: { size: CHUNK } });
+      node.port.onmessage = (e) => onChunk(e.data.pcm, e.data.rms);
+      src.connect(node); node.connect(sink);
+      return { kind: 'worklet', close() { node.port.onmessage = null; try { src.disconnect(); node.disconnect(); } catch (_) { /* nada */ } ctx.close().catch(() => {}); } };
+    } catch (_) { /* ScriptProcessor */ }
+  }
+  // 3. script
+  const proc = ctx.createScriptProcessor(4096, 1, 1), step = ctx.sampleRate / 16000;
+  let buf = new Float32Array(CHUNK), n = 0, acc = 0, accN = 0, pos = 0;
+  proc.onaudioprocess = (ev) => {
+    const d = ev.inputBuffer.getChannelData(0);
+    for (let i = 0; i < d.length; i++) {
+      acc += d[i]; accN++;
+      if (++pos >= step) {
+        pos -= step; buf[n++] = acc / accN; acc = 0; accN = 0;
+        if (n === CHUNK) { let e = 0; for (let k = 0; k < CHUNK; k++) e += buf[k] * buf[k]; onChunk(buf, Math.sqrt(e / CHUNK)); buf = new Float32Array(CHUNK); n = 0; }
+      }
+    }
+  };
+  src.connect(proc); proc.connect(sink);
+  return { kind: 'script', close() { proc.onaudioprocess = null; try { src.disconnect(); proc.disconnect(); } catch (_) { /* nada */ } ctx.close().catch(() => {}); } };
+}
 // Vosk separa las palabras con espacios: se quitan entre caracteres no latinos (el japonés no los lleva)
 const cleanJa = (s) => String(s || '').replace(/\s+/g, ' ').replace(/([^\x00-\x7f]) (?=[^\x00-\x7f])/g, '$1').trim();
 const localEng = {
@@ -381,49 +474,72 @@ const localEng = {
     try { model = await this.load(); } catch (_) { clearInterval(iv); listener.fatal('local-load'); return; }
     clearInterval(iv);
     if (!listener.on || !track) return;
-    const AC = self.AudioContext || self.webkitAudioContext;
-    this.ctx = new AC();
-    if (this.ctx.state !== 'running') await this.ctx.resume().catch(() => {});
-    const rate = this.ctx.sampleRate;
-    const rec = new model.KaldiRecognizer(rate);
-    this.rec = rec; this.partial = '';
+    // El reconocedor trabaja a 16 kHz, la frecuencia del modelo: antes recibía 48 kHz y remuestreaba él (3× de datos)
+    const rec = new model.KaldiRecognizer(16000);
+    this.rec = rec; this.partial = ''; this.hist = []; this.open = false; this.hang = 0; this.pre = null; this.peak = 0.05; this.gain = 1;
     rec.on('partialresult', (m) => {
+      if (this.rec !== rec) return;
       const p = cleanJa(m.result.partial);
       if (p === this.partial) return;
       if (p && !this.partial) this.since = Date.now();
       this.partial = p;
       if (p) { listener.results++; listener.heard = 'voz detectada'; }
-      onSpeech('interim', p);
+      this.interimSoon();
     });
     rec.on('result', (m) => {
       const t = cleanJa(m.result.text);
-      this.partial = '';
+      clearTimeout(this.iT); this.iT = 0;
+      if (this.rec === rec) this.partial = '';
       if (t) { listener.results++; onSpeech('final', t); }
-      onSpeech('interim', '');
+      onSpeech('interim', this.rec === rec ? '' : this.partial);
       listener.paint();
     });
-    this.src = this.ctx.createMediaStreamSource(new MediaStream([track]));
-    this.proc = this.ctx.createScriptProcessor(4096, 1, 1);
-    this.proc.onaudioprocess = (ev) => {
-      const d = ev.inputBuffer.getChannelData(0);
-      if (this.rec === rec) rec.acceptWaveformFloat(d, rate);
-      let e = 0; for (let i = 0; i < d.length; i += 4) e += d[i] * d[i];
-      listener.level = Math.sqrt(e / (d.length / 4));
-      const now = Date.now();
-      if (now - this.lastPaint > 400) { this.lastPaint = now; listener.paint(); }
-    };
-    // Se conecta a un destino de flujo (no a los altavoces): procesa el audio sin reproducir nada
-    this.src.connect(this.proc); this.proc.connect(this.ctx.createMediaStreamDestination());
-    listener.heard = 'reconocedor local listo'; listener.paint();
+    this.tap = await micTap(track, (pcm, rms) => this.chunk(rec, pcm, rms)).catch(() => null);
+    if (!this.tap) { listener.fatal('audio-capture'); return; }
+    if (this.rec !== rec) { this.tap.close(); this.tap = null; return; } // se paró mientras se abría
+    listener.heard = 'reconocedor local listo (captura ' + this.tap.kind + ')'; listener.paint();
+  },
+  // Lo provisional se analiza y se pinta como mucho ~3 veces por segundo (antes, en cada bloque de audio): el
+  // analizador japonés y el repintado eran la mitad del trabajo del móvil mientras se habla
+  interimSoon() {
+    if (this.iT) return;
+    this.iT = setTimeout(() => { this.iT = 0; this.lastI = Date.now(); if (this.rec) onSpeech('interim', this.partial); }, Math.max(0, 330 - (Date.now() - (this.lastI || 0))));
+  },
+  // Cada bloque de 200 ms: nivel, ganancia lenta y puerta de ruido. Con la puerta cerrada (silencio, o solo ruido de
+  // fondo estable) el reconocedor no recibe nada y no gasta procesador; se abre con algo más fuerte que el fondo y
+  // deja pasar el bloque anterior (para no cortar el principio de la palabra) y 800 ms después del último sonido
+  // (para que Kaldi detecte el final de la frase).
+  chunk(rec, pcm, rms) {
+    if (this.rec !== rec) return;
+    listener.level = rms;
+    const now = Date.now();
+    if (now - this.lastPaint > 500) { this.lastPaint = now; listener.paint(); }
+    this.hist.push(rms); if (this.hist.length > 25) this.hist.shift(); // 5 s
+    const floor = this.hist.slice().sort((a, b) => a - b)[Math.floor(this.hist.length * 0.2)];
+    const loud = rms > Math.max(0.0025, floor * 1.5);
+    // ganancia lenta (×1–×6) para que la voz llegue con un nivel parecido aunque el móvil esté lejos del altavoz
+    let pk = 0; for (let i = 0; i < pcm.length; i += 4) { const a = Math.abs(pcm[i]); if (a > pk) pk = a; }
+    this.peak = pk > this.peak ? pk : this.peak * 0.97 + pk * 0.03;
+    this.gain = Math.max(1, Math.min(6, 0.35 / Math.max(this.peak, 1e-4)));
+    const feed = (b) => rec.acceptWaveformFloat(this.gain === 1 ? b : b.map((v) => v * this.gain), 16000);
+    if (S.localGate === false) { feed(pcm); return; }
+    if (loud) {
+      if (!this.open && this.pre) feed(this.pre);
+      this.open = true; this.hang = 4; feed(pcm);
+    } else if (this.open) {
+      feed(pcm);
+      if (--this.hang <= 0) { this.open = false; if (this.partial) rec.retrieveFinalResult(); }
+    }
+    this.pre = pcm;
   },
   // Frases que no se cierran (música de fondo sin silencios): se cierran a la fuerza
   tick() {
     if (this.rec && this.partial && (this.partial.length > 40 || Date.now() - this.since > 8000)) { this.since = Date.now(); this.rec.retrieveFinalResult(); }
   },
   stop() {
-    if (this.proc) { this.proc.onaudioprocess = null; try { this.proc.disconnect(); this.src.disconnect(); } catch (_) { /* nada */ } this.proc = null; }
+    if (this.tap) { this.tap.close(); this.tap = null; }
+    clearTimeout(this.iT); this.iT = 0;
     if (this.rec) { const r = this.rec; this.rec = null; try { r.retrieveFinalResult(); } catch (_) { /* nada */ } setTimeout(() => { try { r.remove(); } catch (_) { /* nada */ } }, 2000); }
-    if (this.ctx) { this.ctx.close().catch(() => {}); this.ctx = null; }
     this.partial = '';
   },
 };
@@ -690,7 +806,7 @@ const pip = {
         [this.canvas.width, this.canvas.height] = PIP_SHAPES[S.pipShape] || PIP_SHAPES.strip;
         this.g = this.canvas.getContext('2d');
         this.video = document.createElement('video'); this.video.muted = true; this.video.playsInline = true;
-        this.video.srcObject = this.canvas.captureStream(12);
+        this.video.srcObject = this.canvas.captureStream(4); // pocos fotogramas: menos trabajo para el móvil
         this.video.addEventListener('leavepictureinpicture', () => { this.on = false; clearInterval(this.iv); $('btnPip').classList.remove('act'); });
       }
       this.on = true; this.draw();
@@ -698,7 +814,7 @@ const pip = {
       await this.video.requestPictureInPicture();
       $('btnPip').classList.add('act');
       // el vídeo necesita fotogramas nuevos aunque el texto no cambie
-      clearInterval(this.iv); this.iv = setInterval(() => this.draw(), 400);
+      clearInterval(this.iv); this.iv = setInterval(() => this.draw(), 1000);
       toast(warnBg ? 'Ventana flotante abierta. Ojo: el reconocedor de Google del navegador no escucha fuera de Kantoro en Android (y pausa otras apps). Para usar Google con Crunchyroll, pon tu clave de Google Cloud en Ajustes.'
         : 'Ventana flotante abierta. Pellízcala para cambiar su tamaño; la forma se elige en Ajustes.', warnBg ? 12000 : 7000);
     } catch (e) {
@@ -814,7 +930,7 @@ for (const sh of document.querySelectorAll('.sheet')) {
 
 // Ajustes
 function fillSettings() {
-  for (const id of ['showOriginal', 'translate', 'continuous', 'keepAwake', 'rawMic']) $(id).checked = !!S[id];
+  for (const id of ['showOriginal', 'translate', 'continuous', 'keepAwake', 'rawMic', 'localGate']) $(id).checked = !!S[id];
   for (const id of ['origScript', 'target', 'longVowels', 'particles', 'fontScale']) $(id).value = S[id];
   $('fsOut').textContent = Math.round(S.fontScale * 100) + '%';
   $('origScript').closest('.row').classList.toggle('off', !S.showOriginal);
@@ -868,7 +984,7 @@ $('gkey').addEventListener('change', (e) => {
 $('gInterim').addEventListener('change', (e) => { S.gInterim = e.target.checked; save(); });
 paintEngine();
 $('btnSettings').addEventListener('click', () => { fillSettings(); $('settings').hidden = false; });
-for (const id of ['showOriginal', 'translate', 'continuous', 'keepAwake', 'rawMic']) {
+for (const id of ['showOriginal', 'translate', 'continuous', 'keepAwake', 'rawMic', 'localGate']) {
   $(id).addEventListener('change', (e) => {
     S[id] = e.target.checked; save(); fillSettings(); repaintAll();
     if (id === 'translate' && S.translate && HAS_TR) translate('こんにちは').then(() => { $('trStatus').textContent = 'Traductor listo (en el dispositivo).'; }, (err) => { $('trStatus').textContent = 'No se pudo preparar el traductor: ' + err.message; });
