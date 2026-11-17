@@ -20,6 +20,7 @@
   </div>
   <button id="btnInstall" class="hbtn" hidden>Instalar</button>
   <button id="btnTab" class="hbtn" hidden title="Escuchar el audio de una pestaña o del sistema">Pestaña</button>
+  <button id="btnEngine" class="hbtn ico" aria-label="Motor de voz" title="Cambiar entre Google (nube) y local (en el dispositivo)"></button>
   <button id="btnPip" class="hbtn ico" hidden aria-label="Ventana flotante" title="Subtítulos en una ventana flotante, encima de otras apps">⧉</button>
   <button id="btnSettings" class="hbtn ico" aria-label="Ajustes">⚙</button>
 </header>
@@ -29,14 +30,11 @@
     <p class="big">聴</p>
     <p><b>Pulsa el sello y deja que el móvil escuche.</b></p>
     <p>Todo lo que se diga en japonés (una conversación, un anime, un vídeo) aparecerá aquí en rōmaji. Toca cualquier palabra para ver su significado y sus kanji.</p>
-    <p><b>⧉</b> saca los subtítulos a una ventana flotante que queda encima de otras apps. En el ordenador, <b>Pestaña</b> escucha directamente el audio de una pestaña.</p>
+    <p>Arriba: la nube / el disco cambian entre el motor de Google y el local; <b>⧉</b> saca los subtítulos a una ventana flotante que queda encima de otras apps. En el ordenador, <b>Pestaña</b> escucha directamente el audio de una pestaña.</p>
     <p class="note" id="privacy">El reconocimiento de voz lo hace el navegador. En Android usa el servicio de Google: el audio del micrófono sale del dispositivo mientras escucha.</p>
   </div>
 </main>
 
-<div class="engbar" role="radiogroup" aria-label="Motor de voz">
-  <span>Motor</span><button data-e="google">Google</button><button data-e="local">Local</button>
-</div>
 <footer>
   <button id="btnClear" class="fbtn" aria-label="Borrar todo">Borrar</button>
   <button id="btnMic" class="mic" aria-label="Escuchar" disabled><span>聴</span></button>

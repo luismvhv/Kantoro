@@ -1,7 +1,7 @@
 /* Kantoro (web app) — escucha japonés por el micrófono y lo muestra en rōmaji, con diccionario al tocar.
  * Reconocimiento: Web Speech API del navegador (micrófono). Análisis: el motor de la extensión, en un Web Worker. */
 'use strict';
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ANDROID = /Android/i.test(navigator.userAgent);
@@ -620,14 +620,21 @@ function fillSettings() {
 }
 function paintEngine() {
   $('privacy').textContent = S.engine === 'local' ? 'Motor local: el audio se reconoce en este dispositivo y no sale de él. La primera vez descarga el modelo de voz (50 MB).' : 'Motor Google: el audio del micrófono se envía al servicio de Google mientras escucha.';
-  document.querySelectorAll('.engbar button').forEach((b) => b.classList.toggle('on', b.dataset.e === S.engine)); }
+  // botón de la cabecera: nube = Google, disco duro = local
+  const b = $('btnEngine');
+  b.innerHTML = S.engine === 'local' ? ICON_DISK : ICON_CLOUD;
+  b.title = S.engine === 'local' ? 'Motor local (en el dispositivo). Pulsa para usar Google' : 'Motor Google (nube). Pulsa para usar el local';
+}
+const ICON_CLOUD = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M7 18h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.4 9.2 4.5 4.5 0 0 0 7 18z"/></svg>';
+const ICON_DISK = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M5 13l2.5-8h9L19 13"/><circle cx="16.5" cy="16.5" r="1" fill="currentColor"/><path d="M6.5 16.5h5"/></svg>';
 function setEngine(e) {
   if (e === S.engine) return;
   S.engine = e; save(); paintEngine();
+  toast(e === 'local' ? 'Cambiado a modo local: el audio se reconoce en este dispositivo.' : 'Cambiado a modo API de Google: el audio se envía al servicio de Google.', 3500);
   if (e === 'local') localEng.load().catch(() => {}); // empieza a descargar el modelo ya
   if (listener.on) { const m = listener.mode; listener.stop(); listener.start(m); }
 }
-document.querySelectorAll('.engbar button').forEach((b) => b.addEventListener('click', () => setEngine(b.dataset.e)));
+$('btnEngine').addEventListener('click', () => setEngine(S.engine === 'local' ? 'google' : 'local'));
 $('engine').addEventListener('change', (e) => { setEngine(e.target.value); fillSettings(); });
 $('pipShape').addEventListener('change', (e) => pip.setShape(e.target.value));
 paintEngine();

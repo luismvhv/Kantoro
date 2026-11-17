@@ -3,7 +3,7 @@
  * · Diccionarios (kuromoji-dict/ y data/, ~34 MB): se guardan la primera vez que se piden y no se vuelven a descargar.
  * Sube SHELL_V al publicar una versión nueva; DATA_V solo si cambian los diccionarios. */
 'use strict';
-const SHELL_V = 'kantoro-shell-v3';
+const SHELL_V = 'kantoro-shell-v4';
 const DATA_V = 'kantoro-data-v1';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'engine-worker.js', 'manifest.webmanifest',
   'engine/romaji.js', 'engine/dict.js', 'engine/analyzer.js', 'lib/kuromoji.js', 'icons/192.png', 'icons/512.png'];

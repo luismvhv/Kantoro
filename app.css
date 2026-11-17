@@ -122,4 +122,6 @@ output { color: var(--muted); font-size: 12px; }
 .engbar { flex: 0 0 auto; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 12px 4px; font-size: 13px; color: var(--muted); background: var(--washi-2); border-top: 1px solid var(--line); }
 .engbar button { background: transparent; border: 1px solid var(--line-2); border-radius: 3px; padding: 4px 12px; font-weight: 700; font-size: 13px; color: var(--muted); }
 .engbar button.on { background: var(--ai); border-color: var(--ai); color: #f7f0dc; box-shadow: inset 0 -2px 0 var(--kin); }
-footer { border-top: 0; }
+
+.hbtn.ico svg { display: block; }
+.hbtn.ico { min-width: 42px; min-height: 36px; display: grid; place-items: center; }
