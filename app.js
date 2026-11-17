@@ -1,7 +1,7 @@
 /* Kantoro (web app) — escucha japonés por el micrófono y lo muestra en rōmaji, con diccionario al tocar.
  * Reconocimiento: Web Speech API del navegador (micrófono). Análisis: el motor de la extensión, en un Web Worker. */
 'use strict';
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ANDROID = /Android/i.test(navigator.userAgent);
@@ -200,13 +200,41 @@ const listener = {
     this.track = null;
   },
   stop() {
-    this.on = false;
+    this.on = false; this.bg = false;
     try { this.rec && this.rec.stop(); } catch (_) { /* ya parado */ }
     this.release();
     ui.listening(false);
   },
+  // Android: el reconocedor de Google (el del sistema) se corta cuando Kantoro pasa a segundo plano y, cada vez que
+  // arranca, quita el foco de audio a la app que esté sonando (Crunchyroll se pausa). Desde una web no se puede
+  // evitar, así que mientras Kantoro no está en primer plano se pasa al motor local, que escucha el micrófono sin
+  // tocar el audio de otras apps; al volver a Kantoro se retoma Google.
+  async toBackground() {
+    if (!ANDROID || !this.on || this.engine !== 'google' || this.bg) return;
+    this.bg = true;
+    try { this.rec && this.rec.abort(); } catch (_) { /* nada */ }
+    if (this.interim) { onSpeech('final', this.interim); this.interim = ''; }
+    onSpeech('interim', '');
+    try {
+      if (!this.track) {
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 } });
+        this.track = this.stream.getAudioTracks()[0] || null;
+      }
+    } catch (_) { this.bg = false; this.spawn(); return; } // sin micrófono propio: se sigue con Google
+    if (!this.bg || !this.on) { this.release(); return; } // ya ha vuelto a primer plano
+    this.engine = 'local';
+    localEng.start(this.track);
+  },
+  toForeground() {
+    if (!this.bg) return;
+    this.bg = false;
+    this.release(); // cierra el motor local (lo que estaba en curso se confirma) y el micrófono propio
+    this.engine = 'google'; this.fail = 0; this.level = -1;
+    if (this.on) this.spawn();
+    this.paint();
+  },
   fatal(code) {
-    this.on = false;
+    this.on = false; this.bg = false;
     try { this.rec && this.rec.abort(); } catch (_) { /* nada */ }
     this.release();
     ui.listening(false);
@@ -234,7 +262,7 @@ const listener = {
     if (!this.on) return;
     const l = this.level;
     const bars = l < 0 ? '' : ' · nivel ' + (l > 0.06 ? '▮▮▮▮' : l > 0.02 ? '▮▮▮▯' : l > 0.006 ? '▮▮▯▯' : l > 0.0015 ? '▮▯▯▯' : '▯▯▯▯');
-    let txt = `${this.engine === 'local' ? 'Local' : 'Google'} · ${this.mode === 'tab' ? 'pestaña' : 'micrófono'}${bars} · ${this.results ? this.results + ' resultados' : this.heard || 'esperando voz'}`;
+    let txt = `${this.bg ? 'Local (segundo plano)' : this.engine === 'local' ? 'Local' : 'Google'} ·${this.mode === 'tab' ? 'pestaña' : 'micrófono'}${bars} · ${this.results ? this.results + ' resultados' : this.heard || 'esperando voz'}`;
     let cls = 'live';
     if (!this.results && l >= 0 && l < 0.0015 && this.starts > 1) { txt = this.mode === 'tab' ? 'No llega sonido de lo compartido: ¿marcaste «Compartir también el audio»?' : 'El micrófono no capta sonido: revisa cuál es el micrófono del equipo y su volumen.'; cls = 'err'; }
     else if (!this.results && this.noSpeech >= 2) { txt += ' — el reconocedor no distingue voz' + (this.mode === 'mic' && !this.track ? ': sube el volumen o acerca el micrófono al altavoz' : ''); }
@@ -242,7 +270,7 @@ const listener = {
     setStatus(txt, cls);
   },
   spawn() {
-    if (!this.on) return;
+    if (!this.on || this.bg) return;
     const r = new this.SR();
     this.rec = r; this.starts++;
     r.lang = 'ja-JP'; r.continuous = !!S.continuous; r.interimResults = true; r.maxAlternatives = 1;
@@ -271,7 +299,7 @@ const listener = {
     r.onsoundstart = () => { this.heard = 'sonido detectado'; this.paint(); };
     r.onspeechstart = () => { this.heard = 'voz detectada'; this.paint(); };
     r.onerror = (e) => {
-      if (!this.on) return;
+      if (!this.on || this.bg) return;
       this.lastErr = e.error;
       if (e.error === 'no-speech') { this.noSpeech++; this.paint(); return; }
       // Sin acceso a Google con la pista propia: se prueba una vez con el micrófono normal del reconocedor
@@ -475,7 +503,7 @@ const pip = {
       try { await document.exitPictureInPicture(); } catch (_) { /* ya cerrada */ } return;
     }
     if (DOC_PIP) { try { await this.openDoc(); return; } catch (_) { /* se prueba con la ventana de vídeo */ } }
-    if (ANDROID && listener.on && listener.engine === 'google') toast('Aviso: en Android el reconocimiento de Google pausa los vídeos de otras apps cada vez que se reinicia. Para ver anime en este móvil usa el motor «Local».', 9000);
+    if (ANDROID && listener.on && listener.engine === 'google') { listener.toBackground(); toast('Fuera de Kantoro se escucha con el motor local: el de Google pausaría el vídeo. Al volver aquí se retoma Google.', 8000); }
     try {
       if (!this.canvas) {
         this.canvas = document.createElement('canvas');
@@ -491,7 +519,7 @@ const pip = {
       $('btnPip').classList.add('act');
       // el vídeo necesita fotogramas nuevos aunque el texto no cambie
       clearInterval(this.iv); this.iv = setInterval(() => this.draw(), 400);
-      if (!(ANDROID && listener.engine === 'google')) toast('Ventana flotante abierta. Pellízcala para cambiar su tamaño; la forma se elige en Ajustes.', 7000);
+      if (!(ANDROID && listener.bg)) toast('Ventana flotante abierta. Pellízcala para cambiar su tamaño; la forma se elige en Ajustes.', 7000);
     } catch (e) {
       this.on = false;
       toast('Este navegador no ha permitido abrir la ventana flotante (' + (e && e.name || 'error') + ').', 7000);
@@ -514,6 +542,7 @@ const ui = {
   },
 };
 document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') listener.toBackground(); else listener.toForeground();
   // al volver a la app se recupera el bloqueo de pantalla; al salir, el navegador corta el micrófono
   if (document.visibilityState === 'visible' && listener.on && S.keepAwake && navigator.wakeLock) navigator.wakeLock.request('screen').then((w) => { wakeLock = w; }, () => {});
 });
