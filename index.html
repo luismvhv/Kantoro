@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kantoro</title>
+<meta name="description" content="Escucha japonés por el micrófono y lo muestra en rōmaji al momento, con diccionario al tocar cada palabra.">
+<meta name="theme-color" content="#1f3a5f">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/192.png">
+<link rel="apple-touch-icon" href="icons/192.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <span class="seal" aria-hidden="true">読</span>
+  <div class="ttl">
+    <h1>Kantoro <small>羅馬字</small></h1>
+    <p id="status">Cargando el diccionario…</p>
+  </div>
+  <button id="btnInstall" class="hbtn" hidden>Instalar</button>
+  <button id="btnSettings" class="hbtn ico" aria-label="Ajustes">⚙</button>
+</header>
+
+<main id="log" aria-live="polite">
+  <div id="empty" class="empty">
+    <p class="big">聴</p>
+    <p><b>Pulsa el sello y deja que el móvil escuche.</b></p>
+    <p>Todo lo que se diga en japonés (una conversación, un anime, un vídeo) aparecerá aquí en rōmaji. Toca cualquier palabra para ver su significado y sus kanji.</p>
+    <p class="note" id="privacy">El reconocimiento de voz lo hace el navegador. En Android usa el servicio de Google: el audio del micrófono sale del dispositivo mientras escucha.</p>
+  </div>
+</main>
+
+<footer>
+  <button id="btnClear" class="fbtn" aria-label="Borrar todo">Borrar</button>
+  <button id="btnMic" class="mic" aria-label="Escuchar" disabled><span>聴</span></button>
+  <button id="btnCopy" class="fbtn" aria-label="Copiar la transcripción">Copiar</button>
+</footer>
+
+<!-- Ficha de diccionario (hoja inferior) -->
+<div id="sheet" class="sheet" hidden>
+  <div class="back" data-close="1"></div>
+  <div class="card" role="dialog" aria-label="Diccionario">
+    <button class="x" data-close="1" aria-label="Cerrar">✕</button>
+    <div id="sheetBody"></div>
+  </div>
+</div>
+
+<!-- Ajustes -->
+<div id="settings" class="sheet" hidden>
+  <div class="back" data-close="1"></div>
+  <div class="card" role="dialog" aria-label="Ajustes">
+    <button class="x" data-close="1" aria-label="Cerrar">✕</button>
+    <h2 data-k="表示">Qué mostrar</h2>
+    <label class="chk"><input type="checkbox" id="showOriginal"><span>Texto japonés debajo del rōmaji</span></label>
+    <label class="row"><span>Escritura</span>
+      <select id="origScript"><option value="kanji">Kanji y kana</option><option value="kana">Hiragana y katakana</option></select></label>
+    <label class="row"><span>Tamaño <output id="fsOut"></output></span>
+      <input type="range" id="fontScale" min="0.8" max="1.8" step="0.05"></label>
+    <div id="trBlock">
+      <label class="chk"><input type="checkbox" id="translate"><span>Traducción encima de cada frase</span></label>
+      <label class="row"><span>Traducir a</span>
+        <select id="target"><option value="es">Español</option><option value="en">Inglés</option><option value="fr">Francés</option><option value="de">Alemán</option><option value="it">Italiano</option><option value="pt">Portugués</option></select></label>
+      <p id="trStatus" class="note"></p>
+    </div>
+    <h2 data-k="読方">Rōmaji</h2>
+    <label class="row"><span>Vocales largas</span>
+      <select id="longVowels"><option value="literal">Literal — tou, kyou</option><option value="macron">Macrón — tō, kyō</option></select></label>
+    <label class="row"><span>Partículas</span>
+      <select id="particles"><option value="phonetic">は へ を → wa, e, o</option><option value="literal">は へ を → ha, he, wo</option></select></label>
+    <h2 data-k="聴取">Escucha</h2>
+    <label class="chk"><input type="checkbox" id="continuous"><span>Sesión continua (si se repiten palabras o se corta, desmárcalo)</span></label>
+    <label class="chk"><input type="checkbox" id="keepAwake"><span>Mantener la pantalla encendida mientras escucha</span></label>
+    <h2 data-k="文字">Escribir o pegar japonés</h2>
+    <textarea id="typed" rows="2" placeholder="今日はいい天気ですね"></textarea>
+    <button id="btnTyped" class="btn">Pasar a rōmaji</button>
+    <p class="note">Diccionarios: JMdict y KANJIDIC2 © EDRDG (CC BY-SA 4.0) · análisis: kuromoji + IPADIC · <span id="ver"></span></p>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
