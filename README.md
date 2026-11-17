@@ -13,7 +13,8 @@ Escucha japonés por el **micrófono** y lo muestra en **rōmaji** al momento, c
 - **Texto → rōmaji y diccionario**: el mismo motor que la extensión (kuromoji + JMdict + KANJIDIC2), dentro de la página, en un Web Worker. No sale nada del dispositivo.
 - Texto provisional mientras se habla, que se confirma al acabar la frase; si la sesión se corta, lo provisional se conserva.
 - Ajustes: japonés debajo (kanji o kana), tamaño, vocales largas, partículas, pantalla siempre encendida, y un cuadro para escribir o pegar japonés.
-- Traducción: solo donde el navegador trae traductor integrado (hoy, Chrome de escritorio). **En el móvil no hay traducción** en este prototipo.
+- Traducción (0.6.0): la integrada del navegador donde exista (Chrome de escritorio) y, si no, **en línea** con el traductor de Google (`translate.googleapis.com`, sin clave; no es una API oficial: para uso comercial habría que pasar a una de pago) con MyMemory como reserva. Solo se envía el texto de cada frase confirmada. En la ventana flotante, la traducción sustituye a la línea japonesa.
+- Modelo local (0.6.0): «Equilibrado» (`-mid`, max-active 4000, beam 11,5, lattice-beam 3, cierres de frase del original; por defecto) o «Ligero» (`-lite`).
 
 ## Publicarla (hace falta HTTPS)
 

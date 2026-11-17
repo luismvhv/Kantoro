@@ -65,6 +65,8 @@
       <label class="chk"><input type="checkbox" id="translate"><span>Traducción encima de cada frase</span></label>
       <label class="row"><span>Traducir a</span>
         <select id="target"><option value="es">Español</option><option value="en">Inglés</option><option value="fr">Francés</option><option value="de">Alemán</option><option value="it">Italiano</option><option value="pt">Portugués</option></select></label>
+      <label class="row"><span>Traductor</span>
+        <select id="trEngine"><option value="auto">Automático</option><option value="online">En línea (Google Translate)</option><option value="local">Integrado del navegador</option></select></label>
       <p id="trStatus" class="note"></p>
     </div>
     <h2 data-k="読方">Rōmaji</h2>
@@ -83,7 +85,9 @@
       <label class="chk"><input type="checkbox" id="gInterim"><span>Texto provisional mientras se habla con Google Cloud (consume unas 2–3 veces más minutos)</span></label>
       <p class="note" id="gNote"></p>
     </div>
-    <label class="chk" id="gateRow"><input type="checkbox" id="localGate"><span>Motor local en modo ahorro: solo trabaja cuando suena algo más fuerte que el ruido de fondo (si se pierden palabras muy bajas, desmárcalo)</span></label>
+    <label class="row"><span>Modelo local</span>
+      <select id="localModel"><option value="mid">Equilibrado (más preciso)</option><option value="lite">Ligero (para móviles lentos)</option></select></label>
+    <label class="chk" id="gateRow"><input type="checkbox" id="localGate"><span>Motor local en modo ahorro: descansa durante los silencios (si se pierden palabras, desmárcalo)</span></label>
     <label class="row" id="shapeRow"><span>Ventana flotante</span>
       <select id="pipShape"><option value="strip">Franja ancha</option><option value="wide">Panorámica 16:9</option><option value="square">Cuadrada</option><option value="tall">Vertical</option></select></label>
     <label class="chk"><input type="checkbox" id="continuous"><span>Sesión continua (si se repiten palabras o se corta, desmárcalo)</span></label>

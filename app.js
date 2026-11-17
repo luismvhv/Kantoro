@@ -1,7 +1,7 @@
 /* Kantoro (web app) — escucha japonés por el micrófono y lo muestra en rōmaji, con diccionario al tocar.
  * Reconocimiento: Web Speech API del navegador (micrófono). Análisis: el motor de la extensión, en un Web Worker. */
 'use strict';
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ANDROID = /Android/i.test(navigator.userAgent);
@@ -24,7 +24,9 @@ const DEFAULTS = {
   // (micrófono propio de la app: sigue escuchando fuera de ella y no toca el audio de Crunchyroll) | 'auto' = cloud en
   // Android si hay clave, si no el del navegador.
   gBackend: 'auto', gkey: '', gInterim: true,
-  localGate: true,        // motor local: solo procesa cuando hay sonido por encima del ruido de fondo
+  localGate: true,        // motor local: no procesa los silencios
+  localModel: 'mid',      // 'mid' (equilibrado) | 'lite' (más ligero, algo menos preciso)
+  trEngine: 'auto',       // traducción: 'auto' (la del navegador si la hay; si no, en línea) | 'local' | 'online'
   gUse: null,            // { m: 'AAAA-MM', s: segundos enviados este mes } (estimación del consumo)
 };
 let S = { ...DEFAULTS };
@@ -63,17 +65,50 @@ function analyze(text) {
   return p;
 }
 
-// ───────────── Traducción (Translator API del navegador; hoy solo en Chrome de escritorio) ─────────────
-const HAS_TR = typeof self.Translator !== 'undefined';
-const translators = new Map();
-async function translate(text) {
-  if (!HAS_TR) throw new Error('no-api');
+// ───────────── Traducción ─────────────
+// · Integrada: Translator API del navegador, en el dispositivo (hoy solo Chrome de escritorio).
+// · En línea: el traductor de Google (translate.googleapis.com, el que usa la web de Google Translate). Gratis y sin
+//   clave, pero no es una API oficial con garantías: si deja de responder, se prueba MyMemory (api.mymemory.translated.net,
+//   API pública gratuita con un límite diario). Solo se envía el texto japonés de cada frase confirmada, nunca audio.
+const HAS_LOCAL_TR = typeof self.Translator !== 'undefined';
+const HAS_TR = true;
+const trMode = () => (S.trEngine === 'online' || (S.trEngine !== 'local' && !HAS_LOCAL_TR) ? 'online' : HAS_LOCAL_TR ? 'local' : 'online');
+const translators = new Map(), trCache = new Map();
+async function translateLocal(text) {
   const target = S.target;
   if (!translators.has(target)) {
     const p = self.Translator.create({ sourceLanguage: 'ja', targetLanguage: target });
     translators.set(target, p); p.catch(() => translators.delete(target));
   }
   return (await translators.get(target)).translate(text);
+}
+async function translateOnline(text) {
+  const tl = S.target;
+  try {
+    const r = await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl=ja&tl=' + tl + '&dt=t&q=' + encodeURIComponent(text));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const out = (j && j[0] || []).map((s) => s && s[0] || '').join('').trim();
+    if (out) return out;
+    throw new Error('vacío');
+  } catch (e) {
+    const r = await fetch('https://api.mymemory.translated.net/get?langpair=ja|' + tl + '&q=' + encodeURIComponent(text));
+    const j = await r.json();
+    const out = j && j.responseData && j.responseData.translatedText;
+    if (r.ok && out && j.responseStatus === 200) return out;
+    throw e;
+  }
+}
+async function translate(text) {
+  const key = trMode() + '|' + S.target + '|' + text;
+  if (!trCache.has(key)) {
+    // en automático, si el integrado falla (p. ej. falta descargar su idioma) se traduce en línea
+    const p = trMode() === 'online' ? translateOnline(text)
+      : translateLocal(text).catch((e) => { if (S.trEngine === 'auto') return translateOnline(text); throw e; });
+    trCache.set(key, p); p.catch(() => trCache.delete(key));
+    if (trCache.size > 500) trCache.delete(trCache.keys().next().value);
+  }
+  return trCache.get(key);
 }
 
 // ───────────── Transcripción en pantalla ─────────────
@@ -116,11 +151,21 @@ async function addFinal(text) {
   if (live) { live.el.remove(); live = null; }
   log.appendChild(el);
   if (stick) toBottom();
-  if (S.translate && HAS_TR) {
-    translate(text).then((t) => { p.tr = t; const e = el.querySelector('.tr'); if (e) e.textContent = t; },
-      () => { const e = el.querySelector('.tr'); if (e) { e.textContent = 'Traducción no disponible.'; e.classList.add('err'); } });
-  }
+  if (S.translate) trPhrase(p);
   if (phrases.length > 300) { const old = phrases[phrases.length - 301]; if (old.el) { old.el.remove(); old.el = null; } }
+}
+function trPhrase(p) {
+  const want = S.target;
+  translate(p.text).then((t) => {
+    if (S.target !== want) return;
+    p.tr = t; pip.draw();
+    const e = p.el && p.el.querySelector('.tr'); if (e) { e.textContent = t; e.classList.remove('err'); }
+  }, () => { const e = p.el && p.el.querySelector('.tr'); if (e) { e.textContent = 'Traducción no disponible (¿sin conexión?).'; e.classList.add('err'); } });
+}
+// Al activar la traducción o cambiar de idioma: se traducen las últimas frases que ya había
+function retranslate() {
+  if (!S.translate) return;
+  phrases.slice(-30).forEach((p) => { p.tr = ''; if (p.el) paintPhrase(p, phrases.indexOf(p)); trPhrase(p); });
 }
 async function setLive(text) {
   if (!text) { if (live) { live.el.remove(); live = null; } return; }
@@ -373,9 +418,11 @@ const listener = {
 // ───────────── Motor local: Vosk (Kaldi en WebAssembly) con el modelo japonés pequeño ─────────────
 // No usa el reconocedor del navegador ni el de Android: el audio del micrófono se procesa en la propia página,
 // sin conexión (salvo la primera descarga del modelo, que queda guardado) y sin pedir el foco de audio del sistema.
-// Modelo con la búsqueda recortada (conf/model.conf: max-active 2500, beam 10, lattice-beam 2; original 7000/13/4):
-// en el PC gasta la mitad de procesador (0,185 frente a 0,379 del tiempo real, test/h_vosk.html) con el mismo texto
-const VOSK_MODEL = 'models/vosk-model-small-ja-0.22-lite.tar.gz';
+// Dos copias del mismo modelo con distinta amplitud de búsqueda (conf/model.conf). Procesador en el PC, en fracción del
+// tiempo real (test/h_vosk.html): original 7000/13/4 → 0,379 · 'mid' 4000/11,5/3 → 0,25 · 'lite' 2500/10/2 → 0,185.
+// 'lite' además cerraba las frases tras 0,4 s de silencio (las partía y perdía contexto); 'mid' mantiene los cierres
+// del original (0,5 / 1 / 2 s). Por defecto 'mid'; 'lite' para móviles a los que aún les cueste.
+const VOSK_MODELS = { mid: 'models/vosk-model-small-ja-0.22-mid.tar.gz', lite: 'models/vosk-model-small-ja-0.22-lite.tar.gz' };
 // ── Captura del micrófono para el motor local, lo más ligera posible ──
 // Entrega bloques de 16 kHz (la frecuencia del modelo: así Kaldi no tiene que remuestrear) de 200 ms con su nivel.
 // Orden de preferencia:
@@ -450,6 +497,11 @@ const cleanJa = (s) => String(s || '').replace(/\s+/g, ' ').replace(/([^\x00-\x7
 const localEng = {
   model: null, loading: null, rec: null, ctx: null, proc: null, src: null, partial: '', since: 0, lastPaint: 0,
   load() {
+    const url = VOSK_MODELS[S.localModel] || VOSK_MODELS.mid;
+    if (this.modelUrl !== url) { // se ha cambiado de modelo: el anterior se libera (su memoria y su hilo)
+      if (this.model) { try { this.model.terminate(); } catch (_) { /* nada */ } }
+      this.model = null; this.loading = null; this.modelUrl = url;
+    }
     if (this.model) return Promise.resolve(this.model);
     if (!this.loading) {
       this.loading = new Promise((res, rej) => {
@@ -458,11 +510,11 @@ const localEng = {
         s.src = 'lib/vosk/vosk.js'; s.onload = () => res(); s.onerror = () => rej(new Error('vosk.js'));
         document.head.appendChild(s);
       }).then(() => Promise.race([
-        self.Vosk.createModel(new URL(VOSK_MODEL, document.baseURI).href),
+        self.Vosk.createModel(new URL(url, document.baseURI).href),
         // si la descarga falla, vosk-browser no avisa: se da por fallida a los 4 minutos
         new Promise((_, rej) => setTimeout(() => rej(new Error("tiempo agotado")), 240000)),
       ]))
-        .then((m) => { this.model = m; return m; });
+        .then((m) => { if (this.modelUrl === url) this.model = m; else { try { m.terminate(); } catch (_) { /* nada */ } } return m; });
       this.loading.catch(() => { this.loading = null; });
     }
     return this.loading;
@@ -505,32 +557,37 @@ const localEng = {
     if (this.iT) return;
     this.iT = setTimeout(() => { this.iT = 0; this.lastI = Date.now(); if (this.rec) onSpeech('interim', this.partial); }, Math.max(0, 330 - (Date.now() - (this.lastI || 0))));
   },
-  // Cada bloque de 200 ms: nivel, ganancia lenta y puerta de ruido. Con la puerta cerrada (silencio, o solo ruido de
-  // fondo estable) el reconocedor no recibe nada y no gasta procesador; se abre con algo más fuerte que el fondo y
-  // deja pasar el bloque anterior (para no cortar el principio de la palabra) y 800 ms después del último sonido
-  // (para que Kaldi detecte el final de la frase).
+  // Cada bloque de 200 ms: nivel, ganancia y puerta de silencio.
+  // La puerta de la 0.5.0 se cerraba con todo lo que no superase 1,5× el ruido de fondo, y con música o voces bajas
+  // se comía frases enteras. Ahora solo se cierra con SILENCIO de verdad: nivel casi nulo o muy cerca del fondo
+  // durante más de 2 s seguidos; cualquier cosa por encima la abre al momento, se recupera 0,6 s de audio anterior
+  // (el principio de la palabra) y nunca se fuerza el cierre de la frase: Kaldi la cierra solo con el silencio que
+  // recibe antes de que la puerta se cierre.
   chunk(rec, pcm, rms) {
     if (this.rec !== rec) return;
     listener.level = rms;
     const now = Date.now();
     if (now - this.lastPaint > 500) { this.lastPaint = now; listener.paint(); }
-    this.hist.push(rms); if (this.hist.length > 25) this.hist.shift(); // 5 s
-    const floor = this.hist.slice().sort((a, b) => a - b)[Math.floor(this.hist.length * 0.2)];
-    const loud = rms > Math.max(0.0025, floor * 1.5);
-    // ganancia lenta (×1–×6) para que la voz llegue con un nivel parecido aunque el móvil esté lejos del altavoz
-    let pk = 0; for (let i = 0; i < pcm.length; i += 4) { const a = Math.abs(pcm[i]); if (a > pk) pk = a; }
-    this.peak = pk > this.peak ? pk : this.peak * 0.97 + pk * 0.03;
-    this.gain = Math.max(1, Math.min(6, 0.35 / Math.max(this.peak, 1e-4)));
+    this.hist.push(rms); if (this.hist.length > 50) this.hist.shift(); // 10 s
+    const floor = this.hist.slice().sort((a, b) => a - b)[Math.floor(this.hist.length * 0.1)];
+    const quiet = rms < Math.max(0.0012, Math.min(0.006, floor * 1.15));
+    // Ganancia (×1–×4) que cambia muy despacio: los saltos bruscos de volumen dentro de una frase confunden la
+    // normalización del modelo. Sube como mucho un 2 % por bloque y baja enseguida si satura.
+    let pk = 0; for (let i = 0; i < pcm.length; i += 2) { const a = Math.abs(pcm[i]); if (a > pk) pk = a; }
+    if (pk > 0.02) this.peak = this.peak * 0.9 + pk * 0.1;
+    const want = Math.max(1, Math.min(4, 0.3 / Math.max(this.peak, 1e-4)));
+    this.gain = pk * this.gain > 0.95 ? Math.max(1, 0.9 / pk) : want > this.gain ? Math.min(want, this.gain * 1.02) : want;
     const feed = (b) => rec.acceptWaveformFloat(this.gain === 1 ? b : b.map((v) => v * this.gain), 16000);
+    const pre = this.pre || (this.pre = []);
     if (S.localGate === false) { feed(pcm); return; }
-    if (loud) {
-      if (!this.open && this.pre) feed(this.pre);
-      this.open = true; this.hang = 4; feed(pcm);
+    if (!quiet) {
+      if (!this.open) pre.forEach(feed);
+      pre.length = 0;
+      this.open = true; this.hang = 10; feed(pcm);
     } else if (this.open) {
       feed(pcm);
-      if (--this.hang <= 0) { this.open = false; if (this.partial) rec.retrieveFinalResult(); }
-    }
-    this.pre = pcm;
+      if (--this.hang <= 0) this.open = false; // 2 s de silencio enviados: Kaldi ya ha cerrado la frase
+    } else { pre.push(pcm); if (pre.length > 3) pre.shift(); }
   },
   // Frases que no se cierran (música de fondo sin silencios): se cierran a la fuerza
   tick() {
@@ -715,14 +772,14 @@ const PIP_CSS = `html,body{margin:0;height:100%;background:#1b1713;overflow:hidd
   body{display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;box-sizing:border-box;
     border-top:4px solid #c9a24a;border-bottom:4px solid #c9a24a;padding:6px 14px;font-family:"Palatino Linotype","Book Antiqua",Georgia,serif}
   .b{margin:.12em 0}.r{font-weight:700;color:#f7f0dc;line-height:1.18}.j{font-family:"Yu Mincho","Yu Gothic","Noto Sans JP",sans-serif;font-size:.52em;color:#8c7f66;line-height:1.3}
-  .dim .r{color:#a89a7c}.live .r{color:#f3bd5c}.live .j{color:#cfa85a}.idle{color:#cdbf9f;font-size:.6em}`;
+  .dim .r{color:#a89a7c}.live .r{color:#f3bd5c}.live .j{color:#cfa85a}.j.t{font-family:inherit;font-style:italic;color:#cfe3f0;font-size:.56em}.dim .j.t{color:#9fb7c9}.idle{color:#cdbf9f;font-size:.6em}`;
 const pip = {
   on: false, canvas: null, g: null, video: null, iv: 0, dw: null,
   supported: DOC_PIP || !!(document.pictureInPictureEnabled && HTMLCanvasElement.prototype.captureStream),
   // ventana de documento (escritorio): HTML real, el texto se ajusta al tamaño que le dé el usuario
   drawDoc() {
     const d = this.dw.document, items = this.lines();
-    d.body.innerHTML = items.length ? items.map((it) => `<div class="b ${it.live ? 'live' : it.dim ? 'dim' : ''}"><div class="r">${esc(it.r)}</div><div class="j">${esc(it.ja)}</div></div>`).join('')
+    d.body.innerHTML = items.length ? items.map((it) => `<div class="b ${it.live ? 'live' : it.dim ? 'dim' : ''}"><div class="r">${esc(it.r)}</div><div class="j${it.tr ? ' t' : ''}">${esc(it.ja)}</div></div>`).join('')
       : `<div class="idle">${listener.on ? 'Kantoro · escuchando…' : 'Kantoro · en pausa'}</div>`;
     const W = this.dw.innerWidth, H = this.dw.innerHeight;
     let fs = Math.min(72, Math.max(14, H / 2.4));
@@ -742,8 +799,10 @@ const pip = {
     const out = [];
     const last = phrases[phrases.length - 1];
     const text = (ws) => ws.map((w) => (w.sp ? ' ' : '') + w.r).join('');
-    if (last && (!live || !live.words.length)) { const prev = phrases[phrases.length - 2]; if (prev) out.push({ r: text(prev.words), ja: prev.text, dim: true }); }
-    if (last) out.push({ r: text(last.words), ja: last.text, dim: !!(live && live.words.length) });
+    // con la traducción activada, debajo del rōmaji va la traducción en vez del japonés
+    const sub = (p) => (S.translate && p.tr ? p.tr : p.text);
+    if (last && (!live || !live.words.length)) { const prev = phrases[phrases.length - 2]; if (prev) out.push({ r: text(prev.words), ja: sub(prev), dim: true, tr: !!(S.translate && prev.tr) }); }
+    if (last) out.push({ r: text(last.words), ja: sub(last), dim: !!(live && live.words.length), tr: !!(S.translate && last.tr) });
     if (live && live.words.length) out.push({ r: text(live.words), ja: live.words.map((w) => w.s).join(''), live: true });
     return out.slice(-2);
   },
@@ -770,13 +829,21 @@ const pip = {
     let fs = Math.round(Math.min(W, H * 2.4) / 15), blocks, total;
     for (; fs >= 20; fs -= 3) {
       blocks = items.map((it) => ({ it, rows: wrap(it.r, `700 ${fs}px Georgia, serif`, W - 48).slice(-maxRows) }));
-      total = blocks.reduce((n, b) => n + b.rows.length * fs * 1.2 + fs * 0.75, 0) + (blocks.length - 1) * fs * 0.3;
+      total = blocks.reduce((n, b) => n + b.rows.length * fs * 1.2 + fs * 0.75 + (b.it.tr ? fs * 0.62 : 0), 0) + (blocks.length - 1) * fs * 0.3;
       if (total <= H - 24) break;
     }
     let y = (H - total) / 2;
     for (const b of blocks) {
       g.font = `700 ${fs}px Georgia, serif`; g.fillStyle = b.it.live ? '#f3bd5c' : b.it.dim ? '#a89a7c' : '#f7f0dc';
       for (const row of b.rows) { g.fillText(row, W / 2, y + fs * 0.6); y += fs * 1.2; }
+      if (b.it.tr) { // traducción: en cursiva clara, hasta dos renglones
+        const f = `italic 500 ${Math.round(fs * 0.55)}px Georgia, serif`;
+        const rows = wrap(b.it.ja, f, W - 48).slice(0, 2);
+        g.font = f; g.fillStyle = b.it.dim ? '#9fb7c9' : '#cfe3f0';
+        rows.forEach((row, i) => g.fillText(row + (i === 1 && rows.length === 2 && wrap(b.it.ja, f, W - 48).length > 2 ? '…' : ''), W / 2, y + fs * 0.3 + i * fs * 0.62));
+        y += fs * 0.75 + fs * 0.3 + (rows.length - 1) * fs * 0.62;
+        continue;
+      }
       g.font = `500 ${Math.round(fs * 0.5)}px "Yu Gothic", "Noto Sans JP", "Noto Sans CJK JP", sans-serif`; g.fillStyle = b.it.live ? '#cfa85a' : '#8c7f66';
       let ja = b.it.ja; while (ja.length > 4 && g.measureText(ja).width > W - 48) ja = '…' + ja.slice(3);
       g.fillText(ja, W / 2, y + fs * 0.3); y += fs * 0.75 + fs * 0.3;
@@ -934,8 +1001,13 @@ function fillSettings() {
   for (const id of ['origScript', 'target', 'longVowels', 'particles', 'fontScale']) $(id).value = S[id];
   $('fsOut').textContent = Math.round(S.fontScale * 100) + '%';
   $('origScript').closest('.row').classList.toggle('off', !S.showOriginal);
-  $('target').closest('.row').classList.toggle('off', !S.translate || !HAS_TR);
-  if (!HAS_TR) { $('translate').disabled = true; $('translate').checked = false; $('trStatus').textContent = 'Este navegador no incluye traductor integrado (hoy solo Chrome de escritorio). En el móvil la traducción no está disponible todavía.'; }
+  $('target').closest('.row').classList.toggle('off', !S.translate);
+  $('trEngine').closest('.row').classList.toggle('off', !S.translate);
+  $('trEngine').value = S.trEngine; $('localModel').value = S.localModel;
+  $('trEngine').querySelector('option[value="local"]').disabled = !HAS_LOCAL_TR;
+  $('trStatus').textContent = !S.translate ? '' : trMode() === 'online'
+    ? 'Traducción en línea (traductor de Google): se envía el texto japonés de cada frase, no el audio. Necesita conexión.' + (HAS_LOCAL_TR ? '' : ' Este navegador no trae traductor integrado.')
+    : 'Traducción integrada del navegador, en el dispositivo (si falla y está en automático, se usa la de en línea).';
   $('ver').textContent = 'Kantoro web ' + VERSION;
   $('engine').value = S.engine; $('pipShape').value = S.pipShape;
   $('shapeRow').hidden = DOC_PIP; // en el ordenador la ventana se estira libremente
@@ -987,11 +1059,17 @@ $('btnSettings').addEventListener('click', () => { fillSettings(); $('settings')
 for (const id of ['showOriginal', 'translate', 'continuous', 'keepAwake', 'rawMic', 'localGate']) {
   $(id).addEventListener('change', (e) => {
     S[id] = e.target.checked; save(); fillSettings(); repaintAll();
-    if (id === 'translate' && S.translate && HAS_TR) translate('こんにちは').then(() => { $('trStatus').textContent = 'Traductor listo (en el dispositivo).'; }, (err) => { $('trStatus').textContent = 'No se pudo preparar el traductor: ' + err.message; });
+    if (id === 'translate' && S.translate) retranslate();
     if ((id === 'continuous' || id === 'rawMic') && listener.on) { listener.stop(); toast('Pulsa el sello para volver a escuchar con el nuevo modo.'); }
   });
 }
-for (const id of ['origScript', 'target', 'longVowels', 'particles']) $(id).addEventListener('change', (e) => { S[id] = e.target.value; save(); repaintAll(); });
+for (const id of ['origScript', 'target', 'longVowels', 'particles']) $(id).addEventListener('change', (e) => { S[id] = e.target.value; save(); repaintAll(); if (id === 'target') retranslate(); });
+$('trEngine').addEventListener('change', (e) => { S.trEngine = e.target.value; save(); fillSettings(); retranslate(); });
+$('localModel').addEventListener('change', (e) => {
+  S.localModel = e.target.value; save();
+  toast(S.localModel === 'lite' ? 'Modelo ligero: gasta menos procesador, acierta algo menos. Se descarga la primera vez (50 MB).' : 'Modelo equilibrado: más preciso, algo más de procesador. Se descarga la primera vez (50 MB).', 6000);
+  if (listener.on && listener.engine === 'local') restartIfOn(); else if (S.engine === 'local') localEng.load().catch(() => {});
+});
 $('fontScale').addEventListener('input', (e) => { S.fontScale = +e.target.value; $('fsOut').textContent = Math.round(S.fontScale * 100) + '%'; document.documentElement.style.setProperty('--fs', S.fontScale); });
 $('fontScale').addEventListener('change', save);
 $('btnTyped').addEventListener('click', () => {
