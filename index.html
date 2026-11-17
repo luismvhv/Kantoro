@@ -19,6 +19,8 @@
     <p id="status">Cargando el diccionario…</p>
   </div>
   <button id="btnInstall" class="hbtn" hidden>Instalar</button>
+  <button id="btnTab" class="hbtn" hidden title="Escuchar el audio de una pestaña o del sistema">Pestaña</button>
+  <button id="btnPip" class="hbtn ico" hidden aria-label="Ventana flotante" title="Subtítulos en una ventana flotante, encima de otras apps">⧉</button>
   <button id="btnSettings" class="hbtn ico" aria-label="Ajustes">⚙</button>
 </header>
 
@@ -27,6 +29,7 @@
     <p class="big">聴</p>
     <p><b>Pulsa el sello y deja que el móvil escuche.</b></p>
     <p>Todo lo que se diga en japonés (una conversación, un anime, un vídeo) aparecerá aquí en rōmaji. Toca cualquier palabra para ver su significado y sus kanji.</p>
+    <p><b>⧉</b> saca los subtítulos a una ventana flotante que queda encima de otras apps. En el ordenador, <b>Pestaña</b> escucha directamente el audio de una pestaña.</p>
     <p class="note" id="privacy">El reconocimiento de voz lo hace el navegador. En Android usa el servicio de Google: el audio del micrófono sale del dispositivo mientras escucha.</p>
   </div>
 </main>
@@ -70,6 +73,7 @@
       <select id="particles"><option value="phonetic">は へ を → wa, e, o</option><option value="literal">は へ を → ha, he, wo</option></select></label>
     <h2 data-k="聴取">Escucha</h2>
     <label class="chk"><input type="checkbox" id="continuous"><span>Sesión continua (si se repiten palabras o se corta, desmárcalo)</span></label>
+    <label class="chk"><input type="checkbox" id="rawMic"><span>Micrófono sin cancelación de eco (necesario para oír lo que suena por el altavoz de este mismo equipo)</span></label>
     <label class="chk"><input type="checkbox" id="keepAwake"><span>Mantener la pantalla encendida mientras escucha</span></label>
     <h2 data-k="文字">Escribir o pegar japonés</h2>
     <textarea id="typed" rows="2" placeholder="今日はいい天気ですね"></textarea>

@@ -1,7 +1,7 @@
 /* Kantoro (web app) — escucha japonés por el micrófono y lo muestra en rōmaji, con diccionario al tocar.
  * Reconocimiento: Web Speech API del navegador (micrófono). Análisis: el motor de la extensión, en un Web Worker. */
 'use strict';
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ANDROID = /Android/i.test(navigator.userAgent);
@@ -14,6 +14,7 @@ const DEFAULTS = {
   longVowels: 'literal', particles: 'phonetic', n: 'n',
   continuous: !ANDROID,   // Chrome para Android repite resultados en sesión continua: allí, una frase por sesión
   keepAwake: true,
+  rawMic: !ANDROID,       // micrófono sin cancelación de eco, entregado al reconocedor como pista (en Android, experimental)
 };
 let S = { ...DEFAULTS };
 try { S = { ...DEFAULTS, ...JSON.parse(localStorage.getItem('kantoro.settings') || '{}') }; } catch (_) { /* ajustes por defecto */ }
@@ -128,7 +129,7 @@ function onSpeech(kind, text) {
   queue = queue.then(() => {
     if (kind === 'interim' && my < seq) return null;
     return kind === 'final' ? addFinal(text) : setLive(text);
-  }).catch(() => {});
+  }).then(() => pip.draw()).catch(() => {});
 }
 function repaintAll() {
   document.documentElement.style.setProperty('--fs', S.fontScale);
@@ -148,22 +149,83 @@ const SR_ERR = {
 };
 const listener = {
   on: false, rec: null, fail: 0, interim: '', lastFinalAt: 0, starts: 0, results: 0,
-  start() {
+  mode: 'mic', stream: null, track: null, level: -1, noSpeech: 0, heard: '', lastErr: '',
+  // mode 'mic': micrófono. mode 'tab': audio de una pestaña o del sistema (solo escritorio).
+  // Con S.rawMic el micrófono se abre SIN cancelación de eco ni supresión de ruido y se entrega al reconocedor
+  // como pista: si no, el navegador elimina precisamente el sonido que sale por el altavoz del propio equipo.
+  async start(mode = 'mic') {
     const SR = self.SpeechRecognition || self.webkitSpeechRecognition;
     if (!SR) { this.fatal('no-api'); return; }
-    this.SR = SR; this.on = true; this.fail = 0; this.spawn();
+    this.SR = SR; this.mode = mode; this.stream = null; this.track = null;
+    this.level = -1; this.noSpeech = 0; this.results = 0; this.heard = ''; this.lastErr = '';
+    const md = navigator.mediaDevices;
+    try {
+      if (mode === 'tab') {
+        const st = await md.getDisplayMedia({ video: true, audio: true });
+        const at = st.getAudioTracks()[0];
+        if (!at) { st.getTracks().forEach((t) => t.stop()); toast('No se ha compartido el audio: elige una pestaña y marca «Compartir también el audio de la pestaña».', 8000); return; }
+        this.stream = st; this.track = at;
+        at.addEventListener('ended', () => { if (this.on) this.stop(); });
+      } else if (S.rawMic && md && md.getUserMedia) {
+        this.stream = await md.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+        this.track = this.stream.getAudioTracks()[0] || null;
+      }
+    } catch (e) {
+      if (mode === 'tab') { toast('No se ha compartido nada.'); return; }
+      if (e && e.name === 'NotAllowedError') { this.fatal('not-allowed'); return; }
+      this.stream = null; this.track = null; // sin acceso directo: micrófono normal del reconocedor
+    }
+    this.meterStart();
+    this.on = true; this.fail = 0; this.spawn();
     ui.listening(true);
+  },
+  release() {
+    clearInterval(this.meterIv); this.meterIv = 0;
+    if (this.actx) { this.actx.close().catch(() => {}); this.actx = null; }
+    if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
+    this.track = null;
   },
   stop() {
     this.on = false;
     try { this.rec && this.rec.stop(); } catch (_) { /* ya parado */ }
+    this.release();
     ui.listening(false);
   },
   fatal(code) {
     this.on = false;
     try { this.rec && this.rec.abort(); } catch (_) { /* nada */ }
+    this.release();
     ui.listening(false);
     setStatus(SR_ERR[code] || 'El reconocimiento de voz se ha detenido (' + code + ').', 'err');
+  },
+  // Nivel del sonido que llega (solo cuando la app tiene la pista de audio): sirve para ver si el fallo es de entrada
+  meterStart() {
+    if (!this.stream) return;
+    try {
+      const AC = self.AudioContext || self.webkitAudioContext;
+      this.actx = new AC();
+      const an = this.actx.createAnalyser(); an.fftSize = 2048;
+      this.actx.createMediaStreamSource(new MediaStream([this.track])).connect(an);
+      const buf = new Float32Array(an.fftSize);
+      this.meterIv = setInterval(() => {
+        an.getFloatTimeDomainData(buf);
+        let e = 0; for (let i = 0; i < buf.length; i++) e += buf[i] * buf[i];
+        this.level = Math.sqrt(e / buf.length);
+        this.paint();
+      }, 400);
+    } catch (_) { this.level = -1; }
+  },
+  // Estado en la cabecera: origen, nivel, qué oye el reconocedor y cuántas frases lleva
+  paint() {
+    if (!this.on) return;
+    const l = this.level;
+    const bars = l < 0 ? '' : ' · nivel ' + (l > 0.06 ? '▮▮▮▮' : l > 0.02 ? '▮▮▮▯' : l > 0.006 ? '▮▮▯▯' : l > 0.0015 ? '▮▯▯▯' : '▯▯▯▯');
+    let txt = `Escuchando (${this.mode === 'tab' ? 'pestaña' : 'micrófono'})${bars} · ${this.results ? this.results + ' resultados' : this.heard || 'esperando voz'}`;
+    let cls = 'live';
+    if (!this.results && l >= 0 && l < 0.0015 && this.starts > 1) { txt = this.mode === 'tab' ? 'No llega sonido de lo compartido: ¿marcaste «Compartir también el audio»?' : 'El micrófono no capta sonido: revisa cuál es el micrófono del equipo y su volumen.'; cls = 'err'; }
+    else if (!this.results && this.noSpeech >= 2) { txt += ' — el reconocedor no distingue voz' + (this.mode === 'mic' && !this.track ? ': sube el volumen o acerca el micrófono al altavoz' : ''); }
+    if (this.lastErr && !this.results) txt += ` (${this.lastErr})`;
+    setStatus(txt, cls);
   },
   spawn() {
     if (!this.on) return;
@@ -173,7 +235,7 @@ const listener = {
     let upTo = 0, lastFinal = '';
     this.interim = '';
     r.onresult = (e) => {
-      this.fail = 0; this.results++;
+      this.fail = 0; this.results++; this.paint();
       let interim = '';
       for (let i = 0; i < e.results.length; i++) {
         const res = e.results[i];
@@ -191,8 +253,13 @@ const listener = {
       this.interim = interim;
       onSpeech('interim', interim);
     };
+    r.onaudiostart = () => { if (!this.heard) this.heard = 'micrófono abierto'; this.paint(); };
+    r.onsoundstart = () => { this.heard = 'sonido detectado'; this.paint(); };
+    r.onspeechstart = () => { this.heard = 'voz detectada'; this.paint(); };
     r.onerror = (e) => {
-      if (!this.on || e.error === 'no-speech') return;
+      if (!this.on) return;
+      this.lastErr = e.error;
+      if (e.error === 'no-speech') { this.noSpeech++; this.paint(); return; }
       if (['not-allowed', 'service-not-allowed', 'audio-capture', 'language-not-supported'].includes(e.error)) { this.fatal(e.error); return; }
       if (++this.fail >= 5) this.fatal(e.error);
     };
@@ -202,8 +269,11 @@ const listener = {
       onSpeech('interim', '');
       if (this.on) setTimeout(() => this.spawn(), this.fail ? Math.min(2000, 400 * this.fail) : 0);
     };
-    try { r.start(); }
-    catch (err) { // p. ej. la sesión anterior aún no ha terminado de cerrarse
+    try { if (this.track) r.start(this.track); else r.start(); }
+    catch (err) {
+      // este navegador no admite reconocer una pista de audio: se vuelve al micrófono normal del reconocedor
+      if (this.track && this.mode === 'mic') { this.release(); this.level = -1; setTimeout(() => this.spawn(), 50); return; }
+      // p. ej. la sesión anterior aún no ha terminado de cerrarse
       if (++this.fail >= 5) this.fatal(String(err.name || err)); else setTimeout(() => this.spawn(), 300);
     }
   },
@@ -213,13 +283,86 @@ setInterval(() => {
   if (listener.on && listener.rec && listener.interim.length > 60) { try { listener.rec.stop(); } catch (_) { /* nada */ } }
 }, 500);
 
+// ───────────── Ventana flotante (imagen en imagen) ─────────────
+// Una web app no puede dibujar encima de otras apps, salvo con una ventana de vídeo «imagen en imagen»: los
+// subtítulos se pintan en un lienzo, el lienzo se convierte en vídeo y ese vídeo se saca a la ventana flotante
+// del sistema, que queda por encima de cualquier app (Crunchyroll, YouTube…).
+const pip = {
+  on: false, canvas: null, g: null, video: null, iv: 0,
+  supported: !!(document.pictureInPictureEnabled && HTMLCanvasElement.prototype.captureStream),
+  lines() { // lo último confirmado (tenue) y lo que se está oyendo (vivo)
+    const out = [];
+    const last = phrases[phrases.length - 1];
+    const text = (ws) => ws.map((w) => (w.sp ? ' ' : '') + w.r).join('');
+    if (last && (!live || !live.words.length)) { const prev = phrases[phrases.length - 2]; if (prev) out.push({ r: text(prev.words), ja: prev.text, dim: true }); }
+    if (last) out.push({ r: text(last.words), ja: last.text, dim: !!(live && live.words.length) });
+    if (live && live.words.length) out.push({ r: text(live.words), ja: live.words.map((w) => w.s).join(''), live: true });
+    return out.slice(-2);
+  },
+  draw() {
+    if (!this.on) return;
+    const g = this.g, W = this.canvas.width, H = this.canvas.height;
+    g.fillStyle = '#1b1713'; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#c9a24a'; g.fillRect(0, 0, W, 4); g.fillRect(0, H - 4, W, 4);
+    const items = this.lines();
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    if (!items.length) {
+      g.fillStyle = '#cdbf9f'; g.font = '600 34px Georgia, serif';
+      g.fillText(listener.on ? 'Kantoro · escuchando…' : 'Kantoro · en pausa', W / 2, H / 2);
+      return;
+    }
+    // ajustar el tamaño para que todo quepa: cada frase es rōmaji (1–2 renglones) + japonés
+    const wrap = (txt, font, max) => {
+      g.font = font; const words = txt.split(' '), rows = []; let cur = '';
+      for (const w of words) { const t = cur ? cur + ' ' + w : w; if (g.measureText(t).width > max && cur) { rows.push(cur); cur = w; } else cur = t; }
+      if (cur) rows.push(cur); return rows;
+    };
+    let fs = 54, blocks, total;
+    for (; fs >= 22; fs -= 4) {
+      blocks = items.map((it) => ({ it, rows: wrap(it.r, `700 ${fs}px Georgia, serif`, W - 48).slice(-2) }));
+      total = blocks.reduce((n, b) => n + b.rows.length * fs * 1.2 + fs * 0.75, 0) + (blocks.length - 1) * fs * 0.3;
+      if (total <= H - 24) break;
+    }
+    let y = (H - total) / 2;
+    for (const b of blocks) {
+      g.font = `700 ${fs}px Georgia, serif`; g.fillStyle = b.it.live ? '#f3bd5c' : b.it.dim ? '#a89a7c' : '#f7f0dc';
+      for (const row of b.rows) { g.fillText(row, W / 2, y + fs * 0.6); y += fs * 1.2; }
+      g.font = `500 ${Math.round(fs * 0.5)}px "Yu Gothic", "Noto Sans JP", "Noto Sans CJK JP", sans-serif`; g.fillStyle = b.it.live ? '#cfa85a' : '#8c7f66';
+      let ja = b.it.ja; while (ja.length > 4 && g.measureText(ja).width > W - 48) ja = '…' + ja.slice(3);
+      g.fillText(ja, W / 2, y + fs * 0.3); y += fs * 0.75 + fs * 0.3;
+    }
+  },
+  async toggle() {
+    if (this.on) { try { await document.exitPictureInPicture(); } catch (_) { /* ya cerrada */ } return; }
+    try {
+      if (!this.canvas) {
+        this.canvas = document.createElement('canvas'); this.canvas.width = 960; this.canvas.height = 300;
+        this.g = this.canvas.getContext('2d');
+        this.video = document.createElement('video'); this.video.muted = true; this.video.playsInline = true;
+        this.video.srcObject = this.canvas.captureStream(12);
+        this.video.addEventListener('leavepictureinpicture', () => { this.on = false; clearInterval(this.iv); $('btnPip').classList.remove('act'); });
+      }
+      this.on = true; this.draw();
+      await this.video.play();
+      await this.video.requestPictureInPicture();
+      $('btnPip').classList.add('act');
+      // el vídeo necesita fotogramas nuevos aunque el texto no cambie
+      clearInterval(this.iv); this.iv = setInterval(() => this.draw(), 400);
+      toast('Ventana flotante abierta. Ya puedes cambiar a la otra app; si el texto deja de avanzar, vuelve aquí.', 7000);
+    } catch (e) {
+      this.on = false;
+      toast('Este navegador no ha permitido abrir la ventana flotante (' + (e && e.name || 'error') + ').', 7000);
+    }
+  },
+};
+
 // ───────────── Interfaz ─────────────
 let wakeLock = null;
 const ui = {
   async listening(on) {
     $('btnMic').classList.toggle('on', on);
     $('btnMic').setAttribute('aria-label', on ? 'Detener' : 'Escuchar');
-    if (on) setStatus('Escuchando… habla o acerca el móvil al sonido', 'live');
+    if (on) listener.paint();
     else if ($('status').className !== 'err') setStatus('En pausa · pulsa el sello para escuchar', 'ok');
     try {
       if (on && S.keepAwake && navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen');
@@ -231,7 +374,13 @@ document.addEventListener('visibilitychange', () => {
   // al volver a la app se recupera el bloqueo de pantalla; al salir, el navegador corta el micrófono
   if (document.visibilityState === 'visible' && listener.on && S.keepAwake && navigator.wakeLock) navigator.wakeLock.request('screen').then((w) => { wakeLock = w; }, () => {});
 });
-$('btnMic').addEventListener('click', () => { if (listener.on) listener.stop(); else listener.start(); });
+$('btnMic').addEventListener('click', () => { if (listener.on) listener.stop(); else listener.start('mic'); });
+// Audio de una pestaña o del sistema (solo navegadores de escritorio): sonido limpio, sin pasar por el micrófono
+if (!ANDROID && navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
+  $('btnTab').hidden = false;
+  $('btnTab').addEventListener('click', () => { if (listener.on) listener.stop(); listener.start('tab'); });
+}
+if (pip.supported) { $('btnPip').hidden = false; $('btnPip').addEventListener('click', () => pip.toggle()); }
 $('btnClear').addEventListener('click', () => {
   phrases.length = 0; live = null; seq++;
   log.querySelectorAll('.ph').forEach((e) => e.remove());
@@ -312,7 +461,7 @@ for (const sh of document.querySelectorAll('.sheet')) {
 
 // Ajustes
 function fillSettings() {
-  for (const id of ['showOriginal', 'translate', 'continuous', 'keepAwake']) $(id).checked = !!S[id];
+  for (const id of ['showOriginal', 'translate', 'continuous', 'keepAwake', 'rawMic']) $(id).checked = !!S[id];
   for (const id of ['origScript', 'target', 'longVowels', 'particles', 'fontScale']) $(id).value = S[id];
   $('fsOut').textContent = Math.round(S.fontScale * 100) + '%';
   $('origScript').closest('.row').classList.toggle('off', !S.showOriginal);
@@ -321,11 +470,11 @@ function fillSettings() {
   $('ver').textContent = 'Kantoro web ' + VERSION;
 }
 $('btnSettings').addEventListener('click', () => { fillSettings(); $('settings').hidden = false; });
-for (const id of ['showOriginal', 'translate', 'continuous', 'keepAwake']) {
+for (const id of ['showOriginal', 'translate', 'continuous', 'keepAwake', 'rawMic']) {
   $(id).addEventListener('change', (e) => {
     S[id] = e.target.checked; save(); fillSettings(); repaintAll();
     if (id === 'translate' && S.translate && HAS_TR) translate('こんにちは').then(() => { $('trStatus').textContent = 'Traductor listo (en el dispositivo).'; }, (err) => { $('trStatus').textContent = 'No se pudo preparar el traductor: ' + err.message; });
-    if (id === 'continuous' && listener.on) { listener.stop(); toast('Pulsa el sello para volver a escuchar con el nuevo modo.'); }
+    if ((id === 'continuous' || id === 'rawMic') && listener.on) { listener.stop(); toast('Pulsa el sello para volver a escuchar con el nuevo modo.'); }
   });
 }
 for (const id of ['origScript', 'target', 'longVowels', 'particles']) $(id).addEventListener('change', (e) => { S[id] = e.target.value; save(); repaintAll(); });

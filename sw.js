@@ -3,7 +3,7 @@
  * · Diccionarios (kuromoji-dict/ y data/, ~34 MB): se guardan la primera vez que se piden y no se vuelven a descargar.
  * Sube SHELL_V al publicar una versión nueva; DATA_V solo si cambian los diccionarios. */
 'use strict';
-const SHELL_V = 'kantoro-shell-v1';
+const SHELL_V = 'kantoro-shell-v2';
 const DATA_V = 'kantoro-data-v1';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'engine-worker.js', 'manifest.webmanifest',
   'engine/romaji.js', 'engine/dict.js', 'engine/analyzer.js', 'lib/kuromoji.js', 'icons/192.png', 'icons/512.png'];
@@ -28,8 +28,8 @@ self.addEventListener('fetch', (e) => {
     return;
   }
   e.respondWith(caches.open(SHELL_V).then(async (c) => {
-    const hit = await c.match(req, { ignoreSearch: true });
-    const net = fetch(req).then((res) => { if (res.ok) c.put(req, res.clone()); return res; }).catch(() => hit);
-    return hit || net;
+    // Primero la red (así cada versión nueva llega al recargar); sin conexión, lo guardado
+    try { const res = await fetch(req, { cache: 'no-cache' }); if (res.ok) c.put(req, res.clone()); return res; }
+    catch (_) { const hit = await c.match(req, { ignoreSearch: true }); if (hit) return hit; throw _; }
   }));
 });
