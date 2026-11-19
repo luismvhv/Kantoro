@@ -153,5 +153,6 @@ Abrir como archivo local (añadir <code>#tab=1&amp;local=1&amp;auto=1</code>) y 
     document.getElementById('out').textContent = out.join('\n');
     return out;
   }
+  if (/[?&]auto/.test(location.search)) setTimeout(() => runAll(), 400);
 </script>
 </body>

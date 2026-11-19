@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Kantoro — Subtítulos japoneses en rōmaji",
   "short_name": "Kantoro",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Convierte al instante los subtítulos y textos japoneses (kanji, hiragana, katakana) en rōmaji, con traducción y diccionario al pasar el ratón.",
   "minimum_chrome_version": "138",
   "permissions": [

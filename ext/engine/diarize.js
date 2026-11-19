@@ -1,4 +1,9 @@
 /* Kantoro — distinción aproximada de voces (quién habla) en tiempo real, sin red ni modelos.
+ * 1.7.1: el color solo cambia cuando la voz cambia de verdad (umbral para mantener y otro, mayor, para cambiar), el
+ * tono pesa más (en semitonos), las frases con poca voz no cambian de personaje, lo provisional no parpadea y la
+ * ventana de cada frase se corta en la pausa anterior. Banco: test/h_diar.html con test/dialog4.wav (4 voces y
+ * música; tools/make_dialog.ps1): 8/15 → 12/15 frases bien asignadas, 14/14 cambios de personaje detectados y
+ * ninguno de más, provisionales con otro color 31 → 19 de 87. Los parámetros salen de ?sweep en ese banco.
  * Por cada trama de 32 ms con voz se mide el tono fundamental (F0, autocorrelación normalizada) y el "brillo"
  * del timbre (energía de la derivada / energía). Cada frase se resume en [mediana de log2 F0, brillo medio] y se
  * asigna al personaje más cercano, o a uno nuevo si ninguno se parece (agrupamiento en línea, máx. 4 voces).
@@ -7,8 +12,13 @@
   'use strict';
 
   class Diarizer {
-    constructor({ rate = 16000, maxSpeakers = 4, gap = 0, decay = 0.7, H = 8, comp = 10, keepMs = 20000, fW = 0.25, mW = 12, thr = 2.3 } = {}) {
-      this.keepMs = keepMs; this.cl = { fW, mW, thr };
+    // Agrupamiento (1.7.1): distancia = √((Δtono en semitonos / stW)² + (Δtimbre MFCC / mW)²) entre la frase y la
+    // media de cada personaje. keep: por debajo, sigue el mismo personaje; split: por encima, es otra voz (un
+    // personaje conocido si alguno queda por debajo de split, o uno nuevo). Entre ambos, se mantiene el actual: el
+    // color solo cambia cuando la voz cambia de verdad. minN: tramas con tono necesarias para decidir.
+    constructor({ rate = 16000, maxSpeakers = 4, gap = 0, decay = 0.7, H = 8, comp = 10, keepMs = 20000, stW = 1.5, mW = 12, keep = 1.25, split = 1.6, minN = 20, pause = 300, guessNew = true } = {}) {
+      this.keepMs = keepMs; this.cl = { stW, mW, keep, split, minN, pause, guessNew };
+      this.cur = -1;           // personaje de la última frase confirmada
       this.shs = { gap, decay, H, comp };
       this.rate = rate;
       this.max = maxSpeakers;
@@ -101,7 +111,9 @@
           if (f > 250 && f < 4000) { tot += S[k]; cen += S[k] * f; }
         }
         bright = tot ? cen / tot / 1000 : 0;
-        mf = this._mfcc(mag);
+        // timbre del espectro SIN el fondo (antes se medía con la música incluida y el timbre de una misma voz
+        // variaba mucho de una frase a otra)
+        mf = this._mfcc(this.mfFromBg ? S : mag);
         // Suma de subarmónicos (SHS): el tono candidato f puntúa con la energía (comprimida) de f, 2f … 6f.
         // Funciona aunque el fundamental esté casi ausente (voces graves, música encima) y penaliza f/2,
         // porque sus armónicos impares caen donde no hay energía.
@@ -146,7 +158,18 @@
     }
 
     // Resumen de la voz entre t0 y t1 (ms)
-    features(t0, t1) {
+    // anchor (opcional): cuándo se sabe que ya sonaba esta frase. La ventana empieza 1 s antes por el retraso del
+    // reconocedor, pero así podía incluir el final de la frase ANTERIOR (otro personaje): se corta en la última
+    // pausa (≥ 0,3 s sin voz con tono) anterior a anchor.
+    features(t0, t1, anchor) {
+      if (anchor) {
+        let lastV = -Infinity;
+        for (const f of this.frames) {
+          if (f.t < t0) continue;
+          if (f.t > anchor) break;
+          if (f.f0 > 0) { if (f.t - lastV >= this.cl.pause && lastV > -Infinity) t0 = f.t; lastV = f.t; }
+        }
+      }
       const fr = this.frames.filter((f) => f.t >= t0 && f.t <= t1 && f.f0 > 0);
       const fm = this.frames.filter((f) => f.t >= t0 && f.t <= t1 && f.mf);
       if (fr.length < 6 || fm.length < 6) return null;
@@ -158,52 +181,65 @@
       return { lf0: q(lf, 0.5), br: q(br, 0.5), mf, n: fr.length };
     }
 
-    // Personaje más parecido SIN actualizar los grupos (para resultados provisionales)
+    dist(s, feat) {
+      let m = 0; for (let k = 0; k < 12; k++) m += (s.mf[k] - feat.mf[k]) ** 2;
+      const st = 12 * (s.lf0 - feat.lf0); // semitonos
+      return Math.hypot(st / this.cl.stW, Math.sqrt(m) / this.cl.mW);
+    }
+    // Decide sin tocar nada: { id, nuevo } — id -1 si no hay datos para decidir
+    decide(feat) {
+      const { keep, split, minN } = this.cl;
+      const live = this.speakers.map((s, i) => (s.dead ? null : { i, d: this.dist(s, feat) })).filter(Boolean);
+      if (!live.length) return { id: -1, fresh: true };
+      const cur = this.resolve(this.cur);
+      const dc = cur >= 0 ? this.dist(this.speakers[cur], feat) : Infinity;
+      if (dc <= keep) return { id: cur };                                  // la misma voz
+      const best = live.reduce((a, b) => (b.d < a.d ? b : a));
+      if (dc < split) return { id: cur };                                  // duda: no se cambia de color
+      if (best.i !== cur && best.d <= keep + (split - keep) / 2) return { id: best.i }; // vuelve un personaje conocido
+      if (live.length < this.max && best.d >= split) return { id: -1, fresh: true }; // voz nueva
+      return { id: best.i };
+    }
+    // Personaje para lo provisional: el actual, salvo que la voz ya sea claramente la de otro personaje conocido.
+    // No se adelanta un personaje nuevo (eso lo decide el final), así el color no parpadea mientras se habla.
     peek(feat) {
-      if (!feat) return -1;
-      let bi = -1, bd = Infinity;
-      this.speakers.forEach((s, i) => {
-        if (s.dead) return;
-        let m = 0; for (let k = 0; k < 12; k++) m += (s.mf[k] - feat.mf[k]) ** 2;
-        const d = Math.abs(s.lf0 - feat.lf0) / this.cl.fW + Math.sqrt(m) / this.cl.mW;
-        if (d < bd) { bd = d; bi = i; }
-      });
-      return bd <= this.cl.thr ? this.resolve(bi) : -1;
+      if (!feat || feat.n < this.cl.minN) return this.cur >= 0 ? this.resolve(this.cur) : -1;
+      const r = this.decide(feat);
+      if (!r.fresh) return r.id;
+      // voz nueva con datos de sobra: se adelanta el número que tendrá el nuevo personaje (su color)
+      if (this.cl.guessNew && feat.n >= this.cl.minN * 1.5 && this.speakers.every((s) => s.dead || this.dist(s, feat) >= this.cl.split * 1.25)) return this.speakers.length;
+      return this.cur >= 0 ? this.resolve(this.cur) : -1;
     }
     resolve(i) { let k = i; while (k >= 0 && this.speakers[k] && this.speakers[k].dead) k = this.speakers[k].alias; return k; }
 
     // Devuelve el índice de personaje (0..max-1) o -1 si no hay voz suficiente
     assign(feat) {
-      if (!feat) return -1;
-      const { fW, mW, thr } = this.cl;
-      const dist = (s) => {
-        let m = 0; for (let i = 0; i < 12; i++) m += (s.mf[i] - feat.mf[i]) ** 2;
-        return Math.abs(s.lf0 - feat.lf0) / fW + Math.sqrt(m) / mW;
-      };
-      let bi = -1, bd = Infinity;
-      this.speakers.forEach((s, i) => { if (s.dead) return; const d = dist(s); if (d < bd) { bd = d; bi = i; } });
-      if (bi < 0 || (bd > thr && this.speakers.filter((x) => !x.dead).length < this.max)) {
+      // frase con muy poca voz medible: se queda con el personaje actual (no se cambia de color sin pruebas)
+      if (!feat || feat.n < this.cl.minN) return this.cur >= 0 ? this.resolve(this.cur) : -1;
+      const r = this.decide(feat);
+      let id = r.id;
+      if (r.fresh) {
         this.speakers.push({ lf0: feat.lf0, br: feat.br, mf: Float32Array.from(feat.mf), n: 1 });
-        return this.speakers.length - 1;
-      }
-      const s = this.speakers[bi];
-      const w = 1 / Math.min(12, ++s.n); // media adaptativa
-      s.lf0 += (feat.lf0 - s.lf0) * w; s.br += (feat.br - s.br) * w;
-      for (let i = 0; i < 12; i++) s.mf[i] += (feat.mf[i] - s.mf[i]) * w;
-      // Si dos personajes acaban pareciéndose (p. ej. la 1.ª frase se midió antes de conocer la música de fondo),
-      // se fusionan: el de menos frases pasa a ser el otro
-      for (let j = 0; j < this.speakers.length; j++) {
-        const o = this.speakers[j];
-        if (j === bi || o.dead) continue;
-        let m = 0; for (let i = 0; i < 12; i++) m += (o.mf[i] - s.mf[i]) ** 2;
-        if (Math.abs(o.lf0 - s.lf0) / this.cl.fW + Math.sqrt(m) / this.cl.mW < this.cl.thr * 0.9) {
-          const [keep, drop] = o.n >= s.n ? [j, bi] : [bi, j];
-          this.speakers[drop].dead = true; this.speakers[drop].alias = keep;
-          this.speakers[keep].n += this.speakers[drop].n;
-          return keep;
+        id = this.speakers.length - 1;
+      } else {
+        const s = this.speakers[id];
+        const w = 1 / Math.min(10, ++s.n); // media adaptativa
+        s.lf0 += (feat.lf0 - s.lf0) * w; s.br += (feat.br - s.br) * w;
+        for (let i = 0; i < 12; i++) s.mf[i] += (feat.mf[i] - s.mf[i]) * w;
+        // Dos personajes que acaban siendo casi idénticos (la 1.ª frase se midió mal) se fusionan
+        for (let j = 0; j < this.speakers.length; j++) {
+          const o = this.speakers[j];
+          if (j === id || o.dead) continue;
+          if (this.dist(o, s) < this.cl.keep * 0.5) {
+            const [k, drop] = o.n >= s.n ? [j, id] : [id, j];
+            this.speakers[drop].dead = true; this.speakers[drop].alias = k;
+            this.speakers[k].n += this.speakers[drop].n;
+            id = k; break;
+          }
         }
       }
-      return bi;
+      this.cur = id;
+      return id;
     }
   }
 

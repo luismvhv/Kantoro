@@ -384,10 +384,26 @@
       const wantTr = S.mode === 'romaji+tr';
       const sig = (ticker ? 't:' : 'p:') + lanes.map((l) => l.id).join(',') + (wantTr ? ':tr' : '') + (orig ? ':ja' : '');
       if (this.layout !== sig || !this.box.querySelector('.ro')) {
-        this.layout = sig;
+        // En la cinta, los carriles que ya estaban se conservan tal cual (con su posición): antes se rehacían todos
+        // cada vez que aparecía o desaparecía un carril, y la cinta saltaba desde el principio.
+        const flags = (wantTr ? ':tr' : '') + (orig ? ':ja' : '');
+        const keepRails = {};
+        if (ticker && this.layout && this.layout.startsWith('t:') && this.layoutFlags === flags) {
+          this.box.querySelectorAll('.lane.tk').forEach((el) => { keepRails[el.dataset.l] = el; });
+        }
+        this.layout = sig; this.layoutFlags = flags;
         this.box.innerHTML = '<span class="x" title="Cerrar">×</span>' + (wantTr ? `<div class="tr">${this.trHTML || '&#8203;'}</div>` : '') +
           '<div class="ro">' + lanes.map((l) => ticker ? `<div class="lane tk" data-l="${l.id}"><span class="rail"></span></div>` : `<div class="lane row2" data-l="${l.id}"></div>`).join('') + '</div>';
-        this.shifts = {};
+        const shifts = {}, seen = {};
+        for (const l of lanes) {
+          const old = keepRails[l.id];
+          if (!old) continue;
+          const fresh = this.box.querySelector(`.lane[data-l="${l.id}"]`);
+          fresh.replaceWith(old);
+          shifts[l.id] = this.shifts && this.shifts[l.id];
+          seen[l.id] = this.seen && this.seen[l.id];
+        }
+        this.shifts = shifts; this.seen = seen;
       }
       const width = Math.round(Math.min(innerWidth - 40, Math.max(320, (a && a.rect ? a.rect.width : innerWidth * 0.7))));
       for (const l of lanes) {
@@ -401,18 +417,35 @@
         }
         el.style.width = width + 'px';
         const rail = el.querySelector('.rail');
-        // compensar las palabras antiguas recortadas por la izquierda para que lo visible no salte
+        // Palabras antiguas recortadas por la izquierda: la primera que queda estaba dx px a la derecha del inicio;
+        // al quitarlas todo se corre dx a la izquierda, así que la cinta se desplaza dx a la DERECHA para que lo
+        // visible no se mueva (antes se restaba y cada recorte daba un salto).
         const firstKey = l.words[0] && l.words[0].key;
-        const prev = this.shifts[l.id] || 0;
+        const prev = this.shifts[l.id];
         let dx = 0;
-        if (firstKey) { const old = rail.querySelector(`[data-k="${firstKey}"]`); if (old) dx = old.offsetLeft - rail.offsetLeft; }
+        if (firstKey && prev !== undefined && rail.firstElementChild) { const old = rail.querySelector(`[data-k="${firstKey}"]`); if (old) dx = old.offsetLeft - rail.firstElementChild.offsetLeft; }
         rail.innerHTML = wordsHTML(l);
-        let cur = prev - dx;
-        if (dx) { rail.style.transition = 'none'; rail.style.transform = `translateX(${cur}px)`; void rail.offsetWidth; }
-        // anclada a la derecha: el final del texto siempre en el borde derecho
-        const target = el.clientWidth - rail.scrollWidth;
-        rail.style.transition = 'transform .45s cubic-bezier(.2,.7,.3,1)';
-        rail.style.transform = `translateX(${target}px)`;
+        const base = prev === undefined ? undefined : prev + dx;
+        if (dx) { rail.style.transition = 'none'; rail.style.transform = `translateX(${base}px)`; void rail.offsetWidth; }
+        // Anclada a la derecha (el final del texto en el borde derecho), pero la cinta SOLO avanza hacia la izquierda
+        // y SOLO cuando entra una palabra nueva. Si el reconocedor quita o acorta lo provisional mientras espera, la
+        // cinta no retrocede (queda un hueco a la derecha que ocupará la siguiente palabra): así no «tiembla».
+        const natural = el.clientWidth - rail.scrollWidth;
+        const keys = l.words.map((w) => w.key).filter(Boolean);
+        const seenBefore = this.seen[l.id];
+        const fresh = !seenBefore || keys.some((k) => !seenBefore.has(k));
+        this.seen[l.id] = new Set(keys);
+        let target;
+        if (base === undefined) target = natural;                          // carril nuevo: anclado sin animación
+        else if (fresh && natural < base) target = natural;                // entra texto nuevo: avanza
+        else if (base - natural > el.clientWidth * 0.9) target = natural;  // (desfase grande, p. ej. otro tamaño de letra)
+        else if (natural - base > el.clientWidth - 40) target = natural;   // casi nada visible (se borró mucho texto)
+        else target = base;                                                // esperando: quieto
+        if (base === undefined) { rail.style.transition = 'none'; rail.style.transform = `translateX(${target}px)`; void rail.offsetWidth; }
+        else if (target !== base) {
+          rail.style.transition = 'transform .45s cubic-bezier(.2,.7,.3,1)';
+          rail.style.transform = `translateX(${target}px)`;
+        }
         this.shifts[l.id] = target;
       }
       this.show();

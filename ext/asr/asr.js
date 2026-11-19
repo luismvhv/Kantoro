@@ -179,7 +179,7 @@ function speakerFor(finalize) {
   const now = Date.now();
   // El reconocedor entrega los resultados con retraso: la frase sonó aproximadamente entre
   // (primer resultado − 1 s) y (ahora − 0,2 s)
-  const f = diar.features(uttStart - 1000, now - 200);
+  const f = diar.features(uttStart - 1000, now - 200, uttStart); // cortada en la pausa anterior a la frase
   return finalize ? diar.resolve(diar.assign(f)) : diar.peek(f);
 }
 

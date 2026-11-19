@@ -1,0 +1,92 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Banco de la distinción de personajes</title>
+<pre id="out" style="white-space:pre-wrap;font:12px monospace"></pre>
+<script>
+  // Mide engine/diarize.js con un diálogo de tiempos conocidos (test/dialog4.wav + dialog4_segs.json, generados con
+  // tools/make_dialog.ps1). Simula lo que hace asr.js: el audio entra por trozos en tiempo "real", el primer resultado
+  // de cada frase llega 0,6 s después de que empiece a sonar, hay provisionales cada 0,5 s (peek) y el final llega
+  // 0,4 s después de acabar (assign).  ?lib=../ext/engine/diarize.js (por defecto) o diarize_v1.js  ?auto
+  const Q = new URLSearchParams(location.search);
+  const out = (s) => { const p = document.createElement('p'); p.style.margin = 0; p.textContent = s; document.getElementById('out').appendChild(p); };
+  const s = document.createElement('script'); s.src = Q.get('lib') || '../ext/engine/diarize.js';
+  s.onload = () => (Q.has("sweep") ? sweep() : run()).catch((e) => out("ERROR " + e.message));
+  document.head.appendChild(s);
+  let AUD = null;
+  async function sweep() {
+    const grid = [];
+    for (const stW of [1.5, 2, 2.5]) for (const keep of [1, 1.25, 1.5]) for (const split of [1.4, 1.6, 1.9]) if (split > keep) grid.push({ stW, keep, split });
+    for (const o of grid) out(JSON.stringify(o) + "  " + await run(o, true));
+    out("FIN");
+  }
+  async function run(opts = JSON.parse(Q.get("opt") || "{}"), quiet = false) {
+    if (!AUD) { const ac = new AudioContext({ sampleRate: 16000 }); AUD = { buf: await ac.decodeAudioData(await (await fetch(Q.get("wav") || "dialog4.wav")).arrayBuffer()), segs: await (await fetch(Q.get("segs") || "dialog4_segs.json")).json() }; }
+    const buf = AUD.buf;
+    const segs = AUD.segs;
+    const d = buf.getChannelData(0), R = 16000;
+    // ?opt={"keep":1.2,...} para barrer parámetros; ?bg=1 → timbre medido sin el fondo
+    const D = new RJDiarize.Diarizer(Object.assign({ rate: R }, opts));
+    if (Q.get('bg') === '1') D.mfFromBg = true;
+    // eventos ordenados en el tiempo de audio (ms)
+    const ev = [];
+    segs.forEach((g, i) => {
+      const st = g.start * 1000, en = g.end * 1000, utt = st + 600;
+      for (let t = st + 900; t < en + 300; t += 500) ev.push({ t, i, kind: 'peek', utt });
+      ev.push({ t: en + 400, i, kind: 'fin', utt });
+    });
+    ev.sort((a, b) => a.t - b.t);
+    const CH = 1024; let pos = 0, e = 0;
+    const res = segs.map(() => ({ peeks: [], fin: -1 }));
+    const t0 = performance.now();
+    while (pos < d.length || e < ev.length) {
+      const tNow = (pos / R) * 1000;
+      while (e < ev.length && ev[e].t <= tNow) {
+        const x = ev[e++];
+        const f = Q.has('noanchor') ? D.features(x.utt - 1000, x.t - 200) : D.features(x.utt - 1000, x.t - 200, x.utt);
+        if (x.kind === 'peek') res[x.i].peeks.push(D.peek(f));
+        else { res[x.i].fin = D.resolve(D.assign(f)); res[x.i].f = f; }
+      }
+      if (pos >= d.length) { pos += CH; continue; }
+      D.push(d.slice(pos, pos + CH), tNow);
+      pos += CH;
+    }
+    const procMs = performance.now() - t0;
+    // los ids pueden cambiar al fusionarse: se resuelven al final
+    res.forEach((r) => { r.fin = D.resolve(r.fin); r.peeks = r.peeks.map((p) => (p < 0 ? p : D.resolve(p))); });
+    // Asignación personaje real → color: el más frecuente de cada personaje real
+    const truth = segs.map((g) => g.spk);
+    // aciertos con la mejor correspondencia uno a uno (voraz por recuento)
+    const pairs = {};
+    truth.forEach((t, i) => { const k = t + '>' + res[i].fin; pairs[k] = (pairs[k] || 0) + 1; });
+    const used = new Set(), usedC = new Set(), map = {};
+    Object.entries(pairs).sort((a, b) => b[1] - a[1]).forEach(([k]) => { const [t, c] = k.split('>'); if (!used.has(t) && !usedC.has(c)) { used.add(t); usedC.add(c); map[t] = +c; } });
+    const ok = truth.filter((t, i) => map[t] === res[i].fin).length;
+    // cambios de color frente a cambios de personaje
+    let tp = 0, fp = 0, fn = 0;
+    for (let i = 1; i < segs.length; i++) {
+      const realCh = truth[i] !== truth[i - 1], colCh = res[i].fin !== res[i - 1].fin;
+      if (realCh && colCh) tp++; else if (!realCh && colCh) fp++; else if (realCh && !colCh) fn++;
+    }
+    // parpadeo de lo provisional: provisionales cuyo color no es el del final de la misma frase
+    let pk = 0, pkBad = 0;
+    res.forEach((r) => r.peeks.forEach((p) => { pk++; if (p !== r.fin) pkBad++; }));
+    if (!quiet) segs.forEach((g, i) => out(`${String(i).padStart(2)} ${g.spk} → ${res[i].fin}   provisionales ${res[i].peeks.join(',')}   ${g.text}`));
+    if (Q.has('dbg')) {
+      // tono (Hz) de cada frase y distancias medias de timbre entre personajes reales
+      segs.forEach((g, i) => { const f = res[i].f; out(`  ${i} ${g.spk} F0=${f ? Math.round(2 ** f.lf0) : '-'} Hz n=${f ? f.n : 0}`); });
+      const ids = [...new Set(truth)];
+      const md = (a, b) => { let m = 0; for (let k = 0; k < a.length; k++) m += (a[k] - b[k]) ** 2; return Math.sqrt(m); };
+      for (const a of ids) {
+        const row = ids.map((b) => {
+          const xs = []; segs.forEach((_, i) => segs.forEach((__, j) => { if (i < j && truth[i] === a && truth[j] === b && res[i].f && res[j].f) xs.push(md(res[i].f.mf, res[j].f.mf)); }));
+          return b + ':' + (xs.length ? (xs.reduce((p, q) => p + q, 0) / xs.length).toFixed(1) : '-');
+        });
+        out(`  timbre ${a} → ${row.join('  ')}`);
+      }
+    }
+    const voices = D.speakers.filter((x) => !x.dead).length;
+    const sum = `aciertos=${ok}/${segs.length} cambios: bien=${tp} de más=${fp} perdidos=${fn} · provisionales con otro color=${pkBad}/${pk} · voces=${voices} · ${Math.round(procMs)} ms`;
+    if (!quiet) out('RESULTADO ' + sum);
+    return sum;
+  }
+</script>

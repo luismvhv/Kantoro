@@ -61,7 +61,7 @@
   window.qa = (sel) => layers().flatMap((r) => [...r.querySelectorAll(sel)]);
 </script>
 <script src="../ext/engine/subparse.js"></script>
-<script src="../ext/content/content.js"></script>
+<script>/* ?old → content.js anterior (1.7.0) para comparar */ document.write('<scr' + 'ipt src="' + (new URLSearchParams(location.search).has('old') ? 'content_v1.js' : '../ext/content/content.js') + '"></scr' + 'ipt>');</script>
 <script>
   async function runAll() {
     const out = [];
@@ -112,6 +112,38 @@
     await wait(30);
     check('6 monitor con retraso', /retraso ≈ 0,\d\d s/.test(q('.st').textContent), q('.st').textContent);
 
+    // 7. Cinta: mientras espera (lo provisional cambia sin palabras nuevas) no se mueve, y nunca retrocede
+    setSettings({ asrView: 'ticker' });
+    await wait(50);
+    const sx = () => { const r = q('.rail'); const m = r && r.style.transform.match(/-?[\d.]+/); return m ? Math.round(+m[0]) : NaN; };
+    for (let i = 0; i < 4; i++) { msg({ cmd: 'asrPush', fin: '今日はいい天気ですね', spk: 0, t: Date.now() }); await wait(40); }
+    msg({ cmd: 'asrPush', interim: '', t: Date.now() });
+    await wait(80);
+    const xs = [sx()];
+    for (const it of ['明日は', '明日', '明日は雨', '明日は', '明日は雨', '明日', '明日は']) {
+      msg({ cmd: 'asrPush', interim: it, spk: 0, t: Date.now() }); await wait(70); xs.push(sx());
+    }
+    await wait(900); xs.push(sx()); // repintado periódico sin cambios
+    const neverBack = xs.every((x, i) => !i || x <= xs[i - 1]);
+    const moves = xs.filter((x, i) => i && x !== xs[i - 1]).length;
+    check('7 cinta quieta mientras espera y sin retroceder', neverBack && moves <= 2, xs.join(' → '));
+
+    // 8. Al recortar palabras antiguas por la izquierda (más de 70) la cinta no salta: el final sigue en el borde derecho
+    let jumps = 0, lastRight = null;
+    for (let i = 0; i < 16; i++) {
+      msg({ cmd: 'asrPush', fin: '本当にありがとう', spk: 0, t: Date.now() });
+      msg({ cmd: 'asrPush', interim: '', t: Date.now() });
+      await wait(30);
+      const lane = q('.lane.tk'), ws = qa('.rail .w');
+      // sin animación: posición final que tendrá la palabra
+      const rail = q('.rail');
+      const x = sx(), last = ws[ws.length - 1];
+      const right = last.offsetLeft - rail.firstElementChild.offsetLeft + last.offsetWidth + x - (lane.clientWidth);
+      if (lastRight !== null && Math.abs(right) > 12) jumps++;
+      lastRight = right;
+    }
+    check('8 recorte por la izquierda sin saltos', jumps === 0 && qa('.rail .w').length <= 70, 'saltos=' + jumps + ' palabras=' + qa('.rail .w').length + ' borde=' + lastRight);
+
     document.getElementById('out').textContent = out.join('\n');
     return out;
   }
@@ -126,5 +158,6 @@
     msg({ cmd: 'asrPush', recStatus: { results: 12, lat: 380, voices: 2, chunks: 900 } });
     await wait(200);
   }
+  if (new URLSearchParams(location.search).has('auto')) setTimeout(() => runAll(), 300);
 </script>
 </body>
