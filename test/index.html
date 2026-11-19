@@ -1,0 +1,21 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>Kantoro test</title>
+<style>body{margin:0;background:#000;font-family:sans-serif}
+#player{position:relative;width:960px;height:540px;margin:90px auto 0}
+video{width:960px;height:540px;display:block}
+.ytp-caption-window-container{position:absolute;left:0;right:0;bottom:40px;text-align:center;pointer-events:none}
+.ytp-caption-segment{background:rgba(8,8,8,.75);color:#fff;font-size:26px;padding:2px 6px}
+#v2wrap{width:640px;margin:20px auto}</style></head><body>
+<div id="player"><video id="v" src="clip.webm" muted loop playsinline></video>
+<div class="ytp-caption-window-container"><span class="caption-visual-line"><span class="ytp-caption-segment" id="seg"></span></span></div></div>
+<div id="v2wrap"><video id="v2" src="clip.webm" muted width="640" height="360"><track id="t" kind="subtitles" srclang="ja" src="subs.vtt" default></video></div>
+<p style="color:#ccc;width:960px;margin:10px auto">テキスト選択テスト：私は東京へ行きました。</p>
+<script>
+const lines=['私は東京へ行きました。','ちょっと待って、何を言ってるの？','日本語を勉強しています','ラーメンを食べに行こう！','先生、本当にありがとうございました'];
+window.__lat=[];
+function findBox(){for(const h of document.querySelectorAll('kantoro-layer')){const r=h.shadowRoot;if(r&&r.querySelector('.ro'))return h}}
+function ytText(){for(const h of document.querySelectorAll('kantoro-layer')){const r=h.shadowRoot;const b=r&&r.querySelector('.box.on');
+  if(b&&b.querySelector('.ro')&&b.getBoundingClientRect().top<640)return {t:b.querySelector('.ro').textContent,h}}return {t:null}}
+window.setLine=(i)=>new Promise(res=>{const before=ytText().t;const t0=performance.now();document.getElementById('seg').textContent=lines[i];
+  const tick=()=>{const x=ytText();if(x.t&&x.t!==before){res({ms:+(performance.now()-t0).toFixed(1),romaji:x.t,engineMs:x.h.dataset.engineMs});return}
+   if(performance.now()-t0>10000){res({ms:-1});return}requestAnimationFrame(tick)};tick();});
+</script></body></html>

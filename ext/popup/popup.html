@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Kantoro</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="seal" aria-hidden="true">読</span>
+    <div>
+      <h1>Kantoro <small>羅馬字</small></h1>
+      <p id="engine" class="sub">Comprobando motor…</p>
+    </div>
+  </div>
+  <label class="switch" title="Activar / desactivar (Alt+R)">
+    <input type="checkbox" id="enabled"><span></span>
+  </label>
+</header>
+
+<main>
+  <section>
+    <h2 data-k="此頁">Esta página</h2>
+    <div id="diag" class="diag">Analizando la página…</div>
+    <h3 class="sub2">Si el vídeo no trae subtítulos japoneses de texto, leerlos con:</h3>
+    <div class="seg" role="radiogroup">
+      <label><input type="radio" name="videoSource" value="ocr"><span>OCR de la pantalla</span></label>
+      <label><input type="radio" name="videoSource" value="audio"><span>Audio (voz)</span></label>
+    </div>
+    <div id="asrBlock" class="tr" hidden>
+      <label class="row"><span>Motor de voz</span>
+        <select id="asrEngine">
+          <option value="auto">Automático (recomendado)</option>
+          <option value="local">En el dispositivo (privado)</option>
+          <option value="cloud">Servicio de Google</option>
+        </select></label>
+      <div class="model">
+        <span id="asrStatus" class="muted">—</span>
+        <button id="asrDl" class="btn small" hidden>Descargar voz japonesa</button>
+      </div>
+      <label class="row"><span>Mostrar la voz</span>
+        <select id="asrView">
+          <option value="phrase">Frase a frase</option>
+          <option value="ticker">Desplazamiento continuo</option>
+        </select></label>
+      <label class="chk"><input type="checkbox" id="asrSpeakers"><span>Distinguir personajes por la voz (colores y un carril para cada uno)</span></label>
+    </div>
+    <div class="btns">
+      <button id="ocr" class="btn">Leer zona con OCR <kbd>Alt+O</kbd></button>
+      <button id="inject" class="btn" hidden>Activar en esta pestaña</button>
+      <button id="pick" class="btn ghost">Elegir subtítulos</button>
+      <button id="resetSel" class="btn ghost" hidden>Quitar selector</button>
+    </div>
+  </section>
+
+  <section>
+    <h2 data-k="表示">Qué mostrar</h2>
+    <div class="seg" role="radiogroup">
+      <label><input type="radio" name="mode" value="romaji"><span>Solo rōmaji</span></label>
+      <label><input type="radio" name="mode" value="romaji+tr"><span>Rōmaji + traducción</span></label>
+    </div>
+    <div id="trBlock" class="tr">
+      <label class="row">
+        <span>Traducir a</span>
+        <select id="target"></select>
+      </label>
+      <label class="row">
+        <span>Traductor</span>
+        <select id="trEngine">
+          <option value="auto">Automático</option>
+          <option value="online">En línea (Google Translate)</option>
+          <option value="local">Integrado de Chrome</option>
+        </select>
+      </label>
+      <div class="model">
+        <span id="trStatus" class="muted">—</span>
+        <button id="dl" class="btn small" hidden>Descargar modelo</button>
+      </div>
+      <progress id="dlProg" max="1" value="0" hidden></progress>
+    </div>
+  </section>
+
+  <section>
+    <h2 data-k="読方">Rōmaji</h2>
+    <label class="row"><span>Vocales largas</span>
+      <select id="longVowels">
+        <option value="literal">Literal — tou, kyou</option>
+        <option value="macron">Macrón — tō, kyō</option>
+      </select></label>
+    <label class="row"><span>Partículas</span>
+      <select id="particles">
+        <option value="phonetic">は へ を → wa, e, o</option>
+        <option value="literal">は へ を → ha, he, wo</option>
+      </select></label>
+    <label class="row"><span>ん + b/m/p</span>
+      <select id="n">
+        <option value="n">n — shinbun</option>
+        <option value="m">m — shimbun</option>
+      </select></label>
+    <label class="chk"><input type="checkbox" id="markAmbiguous"><span>Subrayar lecturas que dependen del contexto</span></label>
+  </section>
+
+  <section>
+    <h2 data-k="字幕">Overlay</h2>
+    <label class="row"><span>Posición</span>
+      <select id="position">
+        <option value="above">Encima del original</option>
+        <option value="cover">Tapando el original</option>
+      </select></label>
+    <label class="row"><span>Tamaño <output id="fsOut"></output></span>
+      <input type="range" id="fontScale" min="0.6" max="1.8" step="0.05"></label>
+    <label class="row"><span>Sello flotante</span>
+      <select id="bubble">
+        <option value="video">Solo con vídeo</option>
+        <option value="always">Siempre</option>
+        <option value="never">Nunca</option>
+      </select></label>
+    <label class="chk"><input type="checkbox" id="showOriginal"><span>Mostrar también el texto japonés (debajo del rōmaji)</span></label>
+    <label class="row" id="origRow"><span>Escritura</span>
+      <select id="origScript">
+        <option value="kanji">Kanji y kana (como se escribe)</option>
+        <option value="kana">Hiragana y katakana</option>
+      </select></label>
+    <label class="chk"><input type="checkbox" id="selection"><span>Romanizar cualquier texto japonés que selecciones</span></label>
+    <label class="chk"><input type="checkbox" id="subFiles"><span>Usar los archivos de subtítulos japoneses que descargue el reproductor (Crunchyroll y otros)</span></label>
+  </section>
+
+  <section>
+    <h2 data-k="辞書">Al pasar el ratón por una palabra</h2>
+    <label class="chk"><input type="checkbox" id="pauseOnHover"><span>Pausar el vídeo</span></label>
+    <label class="chk"><input type="checkbox" id="resumeOnLeave"><span>Reanudar al retirar el ratón</span></label>
+  </section>
+
+</main>
+
+<footer>Diccionarios: JMdict y KANJIDIC2 © EDRDG (CC BY-SA 4.0) · Atajo: Alt+R</footer>
+<script src="popup.js"></script>
+</body>
+</html>

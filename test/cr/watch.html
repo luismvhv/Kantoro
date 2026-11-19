@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Episodio de prueba - Crunchyroll</title>
+<style>body{margin:0;background:#000}#player{position:relative;width:960px;height:540px;margin:60px auto}video{width:960px;height:540px}</style></head>
+<body><div id="player"><video id="v" muted playsinline></video><canvas id="subs" width="960" height="540" style="position:absolute;inset:0"></canvas></div>
+<script>
+// Simula el reproductor web: pide la reproducción a la API y carga la pista elegida (es-ES)
+(async () => {
+  const r = await fetch('https://cr-play-service.prd.crunchyrollsvc.com/v1/GTEST01/web/chrome/play', { headers: { Authorization: 'Bearer FAKE' } });
+  const play = await r.json();
+  const v = document.getElementById('v');
+  v.src = '/clip.webm';
+  window.__ready = true;
+  const sub = await (await fetch(play.subtitles['es-ES'].url)).text();
+  window.__esLoaded = sub.length;
+  // el reproductor también descarga la pista china (como en tu caso)
+  await (await fetch(play.subtitles['zh-TW'].url)).text();
+})();
+</script></body></html>

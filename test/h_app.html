@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prueba de la web app con audio real</title>
+<base href="../web/">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<script>
+  // Carga la web app real (web/index.html) y sustituye el micrófono por un audio japonés de prueba que suena en
+  // bucle. ?engine=local|google  ?audio=voice.webm  ?wait=segundos. Al terminar escribe el resultado en #result.
+  const Q = new URLSearchParams(location.search);
+  const AUDIO = '../test/' + (Q.get('audio') || 'voice.webm');
+  const report = { steps: [] };
+  const step = (s) => report.steps.push(Math.round(performance.now()) + ' ms · ' + s);
+  navigator.mediaDevices.getUserMedia = async (c) => {
+    report.constraints = c;
+    const ac = new AudioContext();
+    await ac.resume().catch(() => {});
+    const buf = await ac.decodeAudioData(await (await fetch(AUDIO)).arrayBuffer());
+    const src = ac.createBufferSource(); src.buffer = buf; src.loop = true;
+    const dest = ac.createMediaStreamDestination(); src.connect(dest); src.start();
+    step('audio de prueba sonando (' + buf.duration.toFixed(1) + ' s, contexto ' + ac.state + ')');
+    return dest.stream;
+  };
+  // ?cloud=mock: Google Cloud simulado (responde «frase N» con la duración recibida, tras 400 ms)
+  // ?cloud=bad: Google Cloud rechaza la clave (400) → debe pasar al motor local y avisar
+  const CLOUD = Q.get('cloud');
+  const realFetch = window.fetch.bind(window);
+  report.cloud = [];
+  if (CLOUD) window.fetch = async (url, opt) => {
+    if (!String(url).startsWith('https://speech.googleapis.com/')) return realFetch(url, opt);
+    const b = JSON.parse(opt.body);
+    const sec = atob(b.audio.content).length / 2 / b.config.sampleRateHertz;
+    const n = report.cloud.length + 1;
+    report.cloud.push(Math.round(performance.now()) + ' ms · ' + sec.toFixed(2) + ' s · ' + b.config.languageCode);
+    await new Promise((r) => setTimeout(r, 400));
+    if (CLOUD === 'bad') return new Response(JSON.stringify({ error: { code: 400, message: 'API key not valid. Please pass a valid API key.' } }), { status: 400 });
+    return new Response(JSON.stringify({ results: [{ alternatives: [{ transcript: 'こんにちは' + n + '番' }] }] }), { status: 200 });
+  };
+  fetch('index.html').then((r) => r.text()).then((html) => {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('script').forEach((s) => s.remove());
+    document.body.innerHTML = doc.body.innerHTML + '<pre id="result" style="white-space:pre-wrap;font-size:12px;padding:8px"></pre>';
+    try { localStorage.setItem('kantoro.settings', JSON.stringify(CLOUD ? { engine: 'google', gBackend: 'cloud', gkey: 'PRUEBA', gInterim: Q.get('interim') !== '0' } : { engine: Q.get('engine') || 'local', capture: Q.get('cap') || 'auto', localModel: Q.get('model') || 'mid', translate: !!Q.get('tr'), trEngine: Q.get('tr') || 'auto' })); } catch (_) { /* nada */ }
+    const s = document.createElement('script'); s.src = 'app.js';
+    s.onload = async () => {
+      const t0 = Date.now();
+      while (!engineReady && Date.now() - t0 < 60000) await new Promise((r) => setTimeout(r, 300));
+      step('diccionario listo');
+      document.getElementById('btnMic').click();
+      step('sello pulsado');
+      await new Promise((r) => setTimeout(r, (+Q.get('wait') || 45) * 1000));
+      report.status = document.getElementById('status').textContent;
+      report.engineBar = [...document.querySelectorAll('.engbar button.on')].map((b) => b.textContent);
+      report.phrases = phrases.map((p) => p.text + '  →  ' + p.words.map((w) => (w.sp ? ' ' : '') + w.r).join('') + (p.tr ? '  ⇒  ' + p.tr : ''));
+      report.live = live ? live.words.map((w) => w.s).join('') : '';
+      report.localCtx = localEng.ctx && localEng.ctx.state;
+      report.capture = localEng.tap && localEng.tap.kind;
+      report.engine = listener.engine; report.fallback = listener.fallback;
+      report.toast = document.getElementById('toast').textContent;
+      report.use = S.gUse;
+      const out = document.getElementById('result');
+      ('RESULTADO\n' + JSON.stringify(report, null, 1)).split('\n').forEach((l) => { const d = document.createElement('p'); d.textContent = l; d.style.margin = 0; out.appendChild(d); });
+    };
+    document.body.appendChild(s);
+  });
+</script>
+</body>
+</html>

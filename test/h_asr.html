@@ -1,0 +1,157 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Banco de pruebas de asr.js (reconocedor simulado)</title>
+<body>
+<p>Banco de pruebas de <code>ext/asr/asr.js</code> con <code>chrome.*</code> y <code>SpeechRecognition</code> simulados.
+Abrir como archivo local (añadir <code>#tab=1&amp;local=1&amp;auto=1</code>) y ejecutar <code>runAll()</code> en la consola.</p>
+<pre id="out"></pre>
+<script>
+  if (!location.hash) location.hash = 'tab=1&frame=0&local=1&auto=1&ctx=' + encodeURIComponent('進撃の巨人 エレン');
+  // ── chrome.* simulado ──
+  window.sent = [];           // mensajes enviados al service worker
+  window.scoreUnk = null;     // respuesta simulada del diccionario: nº de palabras desconocidas por alternativa
+  const portListeners = [];
+  window.chrome = { runtime: {
+    id: 'test',
+    sendMessage(m) {
+      if (m.to === 'engine' && m.cmd === 'score') return Promise.resolve({ unk: window.scoreUnk || m.texts.map(() => 0) });
+      window.sent.push(m);
+      return Promise.resolve({ ok: true });
+    },
+    connect() { return { postMessage() {}, disconnect() {}, onMessage: { addListener(f) { portListeners.push(f); } }, onDisconnect: { addListener() {} } }; },
+  } };
+  // Enviar ms milisegundos de audio (tono de 200 Hz con armónicos = "voz", o silencio) por el puerto
+  let ph = 0, tt = 0; // fase y tiempo continuos entre trozos: entonación que sube y baja (160–260 Hz), como al hablar
+  window.feed = (ms, voiced) => {
+    const n = Math.round(16 * ms), bytes = new Uint8Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      let v = 0;
+      tt += 1 / 16000;
+      ph += 2 * Math.PI * (210 + 50 * Math.sin(2 * Math.PI * 1.7 * tt)) / 16000;
+      if (voiced) for (let h = 1; h <= 6; h++) v += Math.sin(ph * h) / h;
+      const x = Math.max(-1, Math.min(1, v * 0.25 * (0.7 + 0.3 * Math.sin(2 * Math.PI * 4 * tt)))) * 32767 | 0;
+      bytes[2 * i] = x & 255; bytes[2 * i + 1] = (x >> 8) & 255;
+    }
+    let bin = ''; for (const b of bytes) bin += String.fromCharCode(b);
+    const pcm = btoa(bin);
+    portListeners.forEach((f) => f({ pcm }));
+  };
+  // ── SpeechRecognition simulado ──
+  window.recs = [];
+  class FakeSR {
+    constructor() { this.started = false; this.ended = false; this.processLocally = null; window.recs.push(this); }
+    start(track) { this.started = true; this.track = track; setTimeout(() => this.onaudiostart && this.onaudiostart(), 0); }
+    stop() { setTimeout(() => this.end(), 0); }
+    abort() { this.end(); }
+    end() { if (this.ended) return; this.ended = true; this.onend && this.onend(); }
+    // results: [{ final, alts: [[texto, confianza], …] }]
+    result(results, resultIndex = 0) {
+      const list = results.map((r) => { const a = r.alts.map(([transcript, confidence]) => ({ transcript, confidence })); a.isFinal = !!r.final; return a; });
+      this.onresult({ resultIndex, results: list });
+    }
+    error(code) { this.onerror({ error: code }); }
+  }
+  window.SpeechRecognition = FakeSR;
+  window.cur = () => window.recs[window.recs.length - 1];
+  window.wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  window.texts = () => window.sent.filter((m) => m.cmd === 'asrPush' && (m.fin !== undefined || m.interim !== undefined || m.engine || m.error))
+    .map((m) => m.fin !== undefined ? 'F:' + m.fin : m.interim !== undefined ? 'I:' + m.interim : m.engine ? 'E:' + m.engine : 'X:' + m.error + (m.fatal ? '!' : ''));
+</script>
+<script src="../ext/engine/diarize.js"></script>
+<script src="../ext/asr/asr.js"></script>
+<script>
+  // Pruebas: cada una devuelve [nombre, correcto, detalle]
+  async function runAll() {
+    const out = [];
+    const check = (name, ok, detail) => out.push((ok ? 'OK   ' : 'FALLO') + ' ' + name + (ok ? '' : ' → ' + detail));
+    const reset = () => { window.sent.length = 0; };
+    await wait(20);
+
+    // 1. Provisional compuesto por VARIOS tramos sin confirmar (aunque resultIndex apunte solo al último)
+    reset();
+    cur().result([{ alts: [['今日は', 0]] }, { alts: [['いい天気', 0]] }], 1);
+    await wait(10);
+    check('1 provisional con todos los tramos', texts().join('|') === 'I:今日はいい天気', texts().join('|'));
+
+    // 2. Final + provisional nuevo en el mismo evento; el final no se repite en eventos posteriores
+    reset();
+    cur().result([{ final: true, alts: [['今日はいい天気ですね', 0.9]] }, { alts: [['明日は', 0]] }], 0);
+    await wait(10);
+    cur().result([{ final: true, alts: [['今日はいい天気ですね', 0.9]] }, { alts: [['明日は雨', 0]] }], 1);
+    await wait(10);
+    check('2 final una sola vez + provisional', texts().join('|') === 'F:今日はいい天気ですね|I:明日は|I:明日は雨', texts().join('|'));
+
+    // 3. La sesión se corta con texto provisional → se confirma (promoción) y se reinicia
+    reset();
+    const n0 = recs.length;
+    cur().end();
+    await wait(30);
+    check('3 promoción al cortarse la sesión', texts()[0] === 'F:明日は雨' && recs.length === n0 + 1, texts().join('|') + ' recs=' + (recs.length - n0));
+
+    // 4. Tras reinyectar audio, el reconocedor repite el final de lo ya mostrado → sin duplicados
+    reset();
+    cur().result([{ final: true, alts: [['明日は雨が降るでしょう', 0.8]] }], 0);
+    await wait(10);
+    check('4 sin duplicados tras reinyección', texts().join('|') === 'F:が降るでしょう|I:' || texts().join('|') === 'F:が降るでしょう', texts().join('|'));
+
+    // 5. Alternativas: la 2.ª tiene menos palabras inexistentes en el diccionario → se elige
+    reset();
+    window.scoreUnk = [2, 0];
+    cur().result([{ final: true, alts: [['明日は雨が降るでしょう', 0.8]] }, { final: true, alts: [['貴社の記者が汽車で帰社', 0.4], ['記者が汽車で帰社した', 0.3]] }], 1);
+    await wait(40);
+    check('5 alternativa elegida con el diccionario', texts().join('|') === 'F:記者が汽車で帰社した' && stats.rescored === 1, texts().join('|') + ' rescored=' + stats.rescored);
+    // …y si no hay ventaja clara, gana la primera
+    reset();
+    window.scoreUnk = [0, 0];
+    cur().result([{ final: true, alts: [['x', 1]] }, { final: true, alts: [['x', 1]] }, { final: true, alts: [['本当にありがとう', 0.4], ['本当に有難う', 0.3]] }], 2);
+    await wait(40);
+    check('5b sin ventaja gana la primera', texts().join('|') === 'F:本当にありがとう', texts().join('|'));
+    window.scoreUnk = null;
+
+    // 6. El reconocedor abandona una hipótesis larga sin confirmarla → se rescata
+    reset();
+    cur().result([{ final: true, alts: [['x', 1]] }, { final: true, alts: [['x', 1]] }, { final: true, alts: [['x', 1]] }, { alts: [['そんなことは絶対に許さない', 0]] }], 3);
+    await wait(900);
+    cur().result([{ final: true, alts: [['x', 1]] }, { final: true, alts: [['x', 1]] }, { final: true, alts: [['x', 1]] }, { alts: [['待って', 0]] }], 3);
+    await wait(10);
+    check('6 hipótesis abandonada rescatada', texts().join('|') === 'I:そんなことは絶対に許さない|F:そんなことは絶対に許さない|I:待って', texts().join('|'));
+
+    // 7. El provisional se queda vacío y no llega final → se confirma a los 0,6 s
+    reset();
+    cur().result([{ final: true, alts: [['x', 1]] }, { final: true, alts: [['x', 1]] }, { final: true, alts: [['x', 1]] }, { alts: [['', 0]] }], 3);
+    await wait(1000);
+    check('7 provisional huérfano confirmado', texts().join('|') === 'F:待って|I:', texts().join('|'));
+
+    // 8. "Sordo": entra voz 2,6 s y no sale ningún resultado → reinicio y reinyección del audio no transcrito
+    reset();
+    const n1 = recs.length, d0 = stats.deaf, p0 = stats.preroll;
+    // "habla" con pausas (3 trozos con voz, 1 de silencio), como sílabas y respiraciones
+    for (let i = 0; i < 45 && stats.deaf === d0; i++) { feed(100, i % 4 !== 3); await wait(100); }
+    await wait(300);
+    check('8 reinicio por sordera + reinyección', stats.deaf === d0 + 1 && recs.length === n1 + 1 && stats.preroll === p0 + 1, `deaf=${stats.deaf - d0} recs=${recs.length - n1} preroll=${stats.preroll - p0} voicedMs=${voicedMs} loudMs=${loudMs}`);
+
+    // 9. Retraso voz→texto medido
+    for (let i = 0; i < 44; i++) { feed(100, false); await wait(100); } // 4,4 s de silencio real (caduca el inicio de voz anterior)
+    for (let i = 0; i < 3; i++) { feed(100, true); await wait(100); }
+    cur().result([{ alts: [['はい', 0]] }], 0);
+    await wait(10);
+    check('9 retraso medido', stats.lat > 200 && stats.lat < 800, 'lat=' + stats.lat);
+
+    // 10. Modo automático: Chrome aborta el motor local una y otra vez → primero se quitan los extras
+    //     (frases, alternativas) y a la 4.ª pasa a Google, sin detener la transcripción
+    reset();
+    const n2 = recs.length + 3;
+    for (let i = 0; i < 4; i++) { cur().error('aborted'); cur().end(); await wait(1400); }
+    await wait(400);
+    check('10a modo seguro antes de cambiar', stats.safe === 2 && cur().maxAlternatives === 1, 'safe=' + stats.safe + ' alt=' + cur().maxAlternatives);
+    check('10 cambio de motor automático', texts().includes('E:cloud') && !texts().some((t) => t.endsWith('!')) && recs.length === n2 + 1 && cur().processLocally === false,
+      texts().join('|') + ' local=' + cur().processLocally);
+
+    // 11. Vocabulario de contexto (título de la pestaña)
+    check('11 vocabulario de contexto', known().includes('エレン') && known().includes('進撃') && known().includes('巨人'), known().join(','));
+
+    document.getElementById('out').textContent = out.join('\n');
+    return out;
+  }
+</script>
+</body>

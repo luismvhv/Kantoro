@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Canvas subs</title>
+<style>body{margin:0;background:#000}#p{position:relative;width:1024px;height:576px;margin:60px auto}video,canvas{position:absolute;inset:0;width:1024px;height:576px}</style></head>
+<body><div id="p"><video id="v" src="clip.webm" muted loop autoplay></video><canvas id="c" width="1024" height="576"></canvas></div>
+<script>
+const lines=['今日は本当にいい天気ですね。','ちょっと待って、何を言ってるの？','一緒に頑張ろうね！','お前はもう死んでいる','俺たちの冒険はこれからだ','先生、私を信じてください'];
+const BG=location.search.includes('bg');
+const c=document.getElementById('c'),g=c.getContext('2d');let i=0,cur='',ph=0;
+function background(){ph+=0.03;g.fillStyle='#8a9';g.fillRect(0,0,1024,576);
+  for(let k=0;k<14;k++){const x=512+380*Math.sin(ph*0.7+k),y=300+220*Math.cos(ph*0.5+k*1.7);
+    const gr=g.createRadialGradient(x,y,10,x,y,180);gr.addColorStop(0,`hsl(${(k*47+ph*40)%360},80%,${55+k%3*12}%)`);gr.addColorStop(1,'rgba(0,0,0,0)');
+    g.fillStyle=gr;g.fillRect(0,0,1024,576);}}
+function paint(){g.clearRect(0,0,1024,576);if(BG)background();
+  g.font='bold 38px "Noto Sans CJK JP", sans-serif';g.textAlign='center';g.lineWidth=7;g.strokeStyle='#000';g.lineJoin='round';
+  g.strokeText(cur,512,520);g.fillStyle='#fff';g.fillText(cur,512,520);requestAnimationFrame(paint);}
+function next(){cur=lines[i%lines.length];window.__shown=cur;window.__shownAt=performance.now();i++;}
+const IV=+(new URLSearchParams(location.search).get('ms')||3500);window.__log=[];const _n=next;next=function(){_n();window.__log.push([cur,performance.now()])};next();paint();setInterval(next,IV);
+</script></body></html>

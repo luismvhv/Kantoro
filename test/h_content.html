@@ -1,0 +1,130 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Banco de pruebas de content.js (motor simulado)</title>
+<style>
+  body { margin: 0; background: #20242c; color: #ddd; font: 14px system-ui; }
+  video { display: block; width: 880px; height: 495px; margin: 20px auto 0; background: linear-gradient(160deg, #6d8fb5, #d9b98a 60%, #7a5a48); }
+  pre { margin: 8px 20px; }
+</style>
+<body>
+<video id="v"></video>
+<pre id="out">Servir con tools/serve.ps1 y ejecutar runAll() en la consola.</pre>
+<script>
+  // ── Motor simulado: "analiza" cortando el texto en palabras conocidas (o de 2 en 2 caracteres) ──
+  const LEX = { '今日': 'kyou', 'は': 'wa', 'いい': 'ii', '天気': 'tenki', 'です': 'desu', 'ね': 'ne', '明日': 'ashita', '雨': 'ame', 'が': 'ga',
+    '降る': 'furu', 'でしょう': 'deshou', '本当': 'hontou', 'に': 'ni', 'ありがとう': 'arigatou', '待って': 'matte', '。': '.', '、': ',' };
+  const KEYS = Object.keys(LEX).sort((a, b) => b.length - a.length);
+  window.analyzed = [];   // textos que han llegado al motor
+  window.analyzeDelay = 0;
+  function fakeAnalyze(text) {
+    const words = [];
+    let i = 0;
+    while (i < text.length) {
+      const k = KEYS.find((w) => text.startsWith(w, i)) || text.slice(i, i + 2);
+      const punct = /[。、]/.test(k);
+      words.push({ s: k, k, r: LEX[k] || 'x' + k.length, punct, amb: k === '明日', guess: false, alt: k === '明日' ? ['あす'] : [], ra: k === '明日' ? ['asu'] : [], toks: [{ s: k, k }], sp: words.length > 0 && !punct });
+      i += k.length;
+    }
+    return { lines: [{ words }], romaji: words.map((w) => w.r).join(' '), ms: 1 };
+  }
+  const EXPLAIN = { entries: [{ forms: ['天気'], readings: [{ kana: 'てんき', romaji: 'tenki' }], common: true, es: ['tiempo (atmosférico)', 'clima'],
+      senses: [{ pos: ['sustantivo'], misc: [], field: [], info: [], g: ['weather', 'the elements'] }, { pos: ['sustantivo'], misc: [], field: [], info: [], g: ['fair weather', 'fine weather'] }] }],
+    kanji: [{ c: '天', on: [{ kana: 'テン', romaji: 'TEN' }], kun: [{ kana: 'あまつ', romaji: 'amatsu' }, { kana: 'あめ', romaji: 'ame' }], strokes: 4, jlpt: 4, grade: 1, es: ['cielo', 'firmamento'], en: ['heavens'],
+        words: [{ f: '天気', romaji: 'tenki', g: 'tiempo atmosférico' }, { f: '天国', romaji: 'tengoku', g: 'paraíso' }] },
+      { c: '気', on: [{ kana: 'キ', romaji: 'KI' }, { kana: 'ケ', romaji: 'KE' }], kun: [{ kana: 'いき', romaji: 'iki' }], strokes: 6, jlpt: 4, grade: 1, es: ['espíritu', 'ánimo', 'aire'], en: ['spirit'],
+        words: [{ f: '元気', romaji: 'genki', g: 'salud, ánimo' }] }],
+    grammar: [{ s: '天気', romaji: 'tenki', desc: 'sustantivo · común' }] };
+  let onMsg = null;
+  window.chrome = {
+    runtime: {
+      id: 'test', getURL: (p) => 'about:blank#' + p,
+      onMessage: { addListener(f) { onMsg = f; }, removeListener() {} },
+      sendMessage(m) {
+        if (m.to === 'bg' && m.cmd === 'ensureEngine') return Promise.resolve({ ready: true });
+        if (m.to === 'engine' && m.cmd === 'analyze') { window.analyzed.push(m.text); return new Promise((r) => setTimeout(() => r(fakeAnalyze(m.text)), window.analyzeDelay)); }
+        if (m.to === 'engine' && m.cmd === 'explain') return Promise.resolve(EXPLAIN);
+        if (m.to === 'engine' && m.cmd === 'translate') return Promise.resolve({ text: 'Hoy hace buen tiempo, ¿verdad?' });
+        return Promise.resolve({ ok: true });
+      },
+    },
+    storage: {
+      sync: { get: () => Promise.resolve({ settings: window.SETTINGS || {} }), set: () => Promise.resolve() },
+      onChanged: { addListener(f) { window.storeChanged = f; }, removeListener() {} },
+    },
+  };
+  window.msg = (m) => onMsg(m, {}, () => {});
+  window.setSettings = (s) => { window.SETTINGS = s; window.storeChanged({ settings: { newValue: s } }, 'sync'); };
+  window.wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  // contenido de las capas de Kantoro (shadow DOM)
+  window.layers = () => [...document.querySelectorAll('kantoro-layer')].map((h) => h.shadowRoot);
+  window.q = (sel) => { for (const r of layers()) { const e = r.querySelector(sel); if (e) return e; } return null; };
+  window.qa = (sel) => layers().flatMap((r) => [...r.querySelectorAll(sel)]);
+</script>
+<script src="../ext/engine/subparse.js"></script>
+<script src="../ext/content/content.js"></script>
+<script>
+  async function runAll() {
+    const out = [];
+    const check = (name, ok, detail) => out.push((ok ? 'OK   ' : 'FALLO') + ' ' + name + (ok ? '' : ' → ' + detail));
+    const romaji = () => qa('.box .w, .box .p').map((e) => e.textContent).join(' ');
+    await wait(100);
+    msg({ cmd: 'asrStart', tabId: 1, uiFrame: 0, local: true, auto: true, host: false });
+    await wait(50);
+    check('1 etiqueta con el motor', q('.lbl') && /dispositivo/.test(q('.lbl').textContent), q('.lbl') && q('.lbl').textContent);
+
+    // 2. Provisional que crece: las palabras que no cambian conservan su clave (no se reaniman)
+    msg({ cmd: 'asrPush', interim: '今日は', spk: 0, t: Date.now() });
+    await wait(40);
+    const k1 = qa('.box .w').map((e) => e.dataset.k);
+    msg({ cmd: 'asrPush', interim: '今日はいい天気', spk: 0, t: Date.now() });
+    await wait(40);
+    const k2 = qa('.box .w').map((e) => e.dataset.k);
+    check('2 claves estables al crecer', romaji() === 'kyou wa ii tenki' && k1.length === 2 && k2[0] === k1[0] && k2[1] === k1[1] && k2[2] !== k1[1], romaji() + ' ' + k1 + ' / ' + k2);
+
+    // 3. La frase confirmada conserva las claves de lo provisional
+    msg({ cmd: 'asrPush', fin: '今日はいい天気ですね', spk: 0, t: Date.now() });
+    msg({ cmd: 'asrPush', interim: '', t: Date.now() });
+    await wait(60);
+    const k3 = qa('.box .w').map((e) => e.dataset.k);
+    check('3 final con las mismas claves', romaji() === 'kyou wa ii tenki desu ne' && k3[0] === k2[0] && k3[3] === k2[3] && !q('.box .live'), romaji() + ' ' + k3);
+
+    // 4. Ráfaga de provisionales con el motor lento: solo se analiza el último; los finales, todos y en orden
+    window.analyzeDelay = 60; window.analyzed.length = 0;
+    const burst = ['明', '明日', '明日は', '明日は雨', '明日は雨が', '明日は雨が降る'];
+    for (const b of burst) msg({ cmd: 'asrPush', interim: b, spk: 0, t: Date.now() });
+    msg({ cmd: 'asrPush', fin: '明日は雨が降るでしょう', spk: 0, t: Date.now() });
+    msg({ cmd: 'asrPush', fin: '本当にありがとう', spk: 0, t: Date.now() });
+    msg({ cmd: 'asrPush', interim: '待って', spk: 0, t: Date.now() });
+    await wait(600);
+    check('4 ráfaga: provisionales viejos descartados', window.analyzed.length <= 4 && window.analyzed.includes('明日は雨が降るでしょう') && window.analyzed.includes('本当にありがとう') && window.analyzed[window.analyzed.length - 1] === '待って',
+      window.analyzed.join(' | '));
+    check('4b pantalla al día', /hontou ni arigatou matte$/.test(romaji()), romaji());
+    window.analyzeDelay = 0;
+
+    // 5. Cambio de motor: se actualiza la etiqueta
+    msg({ cmd: 'asrPush', engine: 'cloud', reason: 'language-not-supported' });
+    await wait(30);
+    check('5 etiqueta tras cambiar de motor', /Google/.test(q('.lbl').textContent), q('.lbl').textContent);
+
+    // 6. Monitor con el retraso medido
+    msg({ cmd: 'asrPush', status: { level: 0.05, maxLevel: 0.05, elapsed: 20 } });
+    msg({ cmd: 'asrPush', recStatus: { results: 12, lat: 380, voices: 2, chunks: 900 } });
+    await wait(30);
+    check('6 monitor con retraso', /retraso ≈ 0,\d\d s/.test(q('.st').textContent), q('.st').textContent);
+
+    document.getElementById('out').textContent = out.join('\n');
+    return out;
+  }
+  // Escena para capturas: subtítulos de voz + traducción + japonés debajo
+  async function scene(view) {
+    setSettings({ mode: 'romaji+tr', showOriginal: true, asrView: view || 'phrase', bubble: 'always' });
+    await wait(50);
+    msg({ cmd: 'asrStart', tabId: 1, uiFrame: 0, local: true, auto: true, host: false });
+    msg({ cmd: 'asrPush', fin: '今日はいい天気ですね。', spk: 0, t: Date.now() });
+    msg({ cmd: 'asrPush', interim: '明日は雨が降る', spk: 1, t: Date.now() });
+    msg({ cmd: 'asrPush', status: { level: 0.05, maxLevel: 0.05, elapsed: 20 } });
+    msg({ cmd: 'asrPush', recStatus: { results: 12, lat: 380, voices: 2, chunks: 900 } });
+    await wait(200);
+  }
+</script>
+</body>

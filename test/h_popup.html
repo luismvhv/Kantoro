@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Banco de pruebas del popup (chrome.* simulado)</title>
+<link rel="stylesheet" href="../ext/popup/popup.css">
+<body>
+<script>
+  // Carga el popup real con chrome.* simulado. ?av=available|downloadable|unavailable  ?src=audio|ocr  ?eng=auto|local|cloud
+  const Q = new URLSearchParams(location.search);
+  window.saved = null;
+  window.installed = false;
+  const av = () => (window.installed ? 'available' : Q.get('av') || 'downloadable');
+  window.SpeechRecognition = class { static available() { return Promise.resolve(av()); } static install() { return new Promise((r) => setTimeout(() => { window.installed = true; r(true); }, 300)); } };
+  // ?tav=available|downloadable|unavailable|none: estado simulado del traductor integrado  ?tr=auto|online|local
+  if (Q.get('tav') === 'none') delete window.Translator;
+  else if (Q.get('tav')) window.Translator = { availability: () => Promise.resolve(Q.get('tav')), create: () => Promise.resolve({ translate: (t) => t }) };
+  window.chrome = {
+    runtime: { sendMessage(m) {
+      if (m.cmd === 'status' || m.cmd === 'ensureEngine') return Promise.resolve({ ready: true });
+      if (m.cmd === 'tabState') return Promise.resolve({ subLocales: ['es-ES', 'en-US'], subJa: null });
+      return Promise.resolve({ ok: true });
+    } },
+    storage: { sync: { get: () => Promise.resolve({ settings: { videoSource: Q.get('src') || 'audio', asrEngine: Q.get('eng') || undefined, mode: 'romaji+tr', trEngine: Q.get('tr') || undefined } }), set: (o) => { window.saved = o.settings; return Promise.resolve(); } } },
+    tabs: { query: () => Promise.resolve([{ id: 1, url: 'https://www.crunchyroll.com/watch/X' }]), sendMessage: () => Promise.resolve() },
+    scripting: { executeScript: () => Promise.resolve([{ result: { sources: [], tracks: [], videos: 1, canvases: 0, images: 0, jpText: false, ocr: false, asr: false, subFile: null } }]) },
+    tabCapture: { getMediaStreamId: () => Promise.resolve('x') },
+  };
+  fetch('../ext/popup/popup.html').then((r) => r.text()).then((html) => {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('script').forEach((s) => s.remove());
+    document.body.innerHTML = doc.body.innerHTML;
+    const s = document.createElement('script');
+    s.src = '../ext/popup/popup.js';
+    s.onload = () => { document.dispatchEvent(new Event('DOMContentLoaded')); window.ready = true; };
+    document.body.appendChild(s);
+  });
+</script>
+</body>

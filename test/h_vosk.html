@@ -1,0 +1,49 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Prueba del reconocedor local (Vosk)</title>
+<pre id="out">Ejecuta run() en la consola, o abre con ?auto.</pre>
+<script src="../web/lib/vosk/vosk.js"></script>
+<script>
+  // Mide cuánto procesador gasta Vosk: le da todo el audio de prueba de golpe (en trozos como los del micrófono) y
+  // cronometra hasta el resultado final. Como el reconocedor procesa los mensajes en orden, ese tiempo es su trabajo
+  // total. Factor de tiempo real (RTF) = tiempo de proceso / duración del audio: 0,25 = usa un 25 % de un núcleo.
+  // ?auto[=archivo]  ?model=lite|full  ?rate=16000|48000 (frecuencia que recibe el reconocedor)  ?chunk=ms  ?reps=n
+  const Q = new URLSearchParams(location.search);
+  const log = (s) => { const p = document.createElement('p'); p.textContent = s; document.getElementById('out').appendChild(p); };
+  const MODELS = { full: 'vosk-model-small-ja-0.22.tar.gz', lite: 'vosk-model-small-ja-0.22-lite.tar.gz', mid: 'vosk-model-small-ja-0.22-mid.tar.gz' };
+  async function run(file = 'voice.webm') {
+    const which = Q.get('model') || 'lite', rate = +(Q.get('rate') || 16000), chunkMs = +(Q.get('chunk') || 200), reps = +(Q.get('reps') || 3);
+    const t0 = performance.now();
+    const model = await Vosk.createModel(new URL('../web/models/' + MODELS[which], location).href);
+    const tLoad = performance.now() - t0;
+    const ac = new AudioContext({ sampleRate: rate });
+    const buf = await ac.decodeAudioData(await (await fetch(file)).arrayBuffer());
+    const d = buf.getChannelData(0), step = Math.round(rate * chunkMs / 1000);
+    const runs = [];
+    for (let k = 0; k < reps; k++) {
+      const rec = new model.KaldiRecognizer(rate);
+      // cada trozo produce exactamente un mensaje (provisional o final) y retrieveFinalResult otro más
+      const finals = []; let partials = 0, events = 0, tEnd = 0, done;
+      const nChunks = Math.ceil(d.length / step) + 1, fin = new Promise((r) => { done = r; });
+      const ev = () => { if (++events >= nChunks + 1) { tEnd = performance.now(); done(); } };
+      rec.on('result', (m) => { if (m.result.text) finals.push(m.result.text); ev(); });
+      rec.on('partialresult', () => { partials++; ev(); });
+      const t1 = performance.now();
+      for (let i = 0; i < d.length; i += step) rec.acceptWaveformFloat(d.slice(i, i + step), rate);
+      rec.acceptWaveformFloat(new Float32Array(rate), rate);
+      rec.retrieveFinalResult();
+      await Promise.race([fin, new Promise((r) => setTimeout(r, 120000))]);
+      const procMs = (tEnd || performance.now()) - t1;
+      runs.push({ procMs: Math.round(procMs), finals: finals.length, partials });
+      rec.remove();
+      if (k === 0) log('texto: ' + finals.join(' / '));
+    }
+    const audioS = d.length / rate;
+    const best = Math.min(...runs.map((r) => r.procMs));
+    const out = { model: which, rate, chunkMs, loadMs: Math.round(tLoad), audioS: +audioS.toFixed(1), runs, rtf: +(best / 1000 / audioS).toFixed(3) };
+    log(`RESULTADO rtf=${out.rtf} proc=${runs.map((r) => r.procMs).join('/')}ms audio=${out.audioS}s finales=${runs[0].finals} provisionales=${runs[0].partials} ${which}@${rate} ${chunkMs}ms`);
+    return out;
+  }
+  const auto = Q.get('auto');
+  if (auto !== null) run(auto || 'voice.webm').catch((e) => log('ERROR ' + (e && e.message || e)));
+</script>
