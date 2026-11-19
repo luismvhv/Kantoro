@@ -1,7 +1,7 @@
 /* Kantoro (web app) — escucha japonés por el micrófono y lo muestra en rōmaji, con diccionario al tocar.
  * Reconocimiento: Web Speech API del navegador (micrófono). Análisis: el motor de la extensión, en un Web Worker. */
 'use strict';
-const VERSION = '0.6.0';
+const VERSION = '0.6.1';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const ANDROID = /Android/i.test(navigator.userAgent);
@@ -82,11 +82,26 @@ async function translateLocal(text) {
   }
   return (await translators.get(target)).translate(text);
 }
+// Idiomas destino (los mismos que la extensión); los principales primero
+const LANGS = [
+  ['es', 'Español'], ['en', 'Inglés'], ['fr', 'Francés'], ['de', 'Alemán'], ['it', 'Italiano'], ['pt', 'Portugués'],
+  ['ca', 'Catalán'], ['gl', 'Gallego'], ['eu', 'Euskera'],
+  ['zh', 'Chino simplificado'], ['zh-Hant', 'Chino tradicional'], ['ko', 'Coreano'], ['ru', 'Ruso'], ['ar', 'Árabe'], ['hi', 'Hindi'],
+  ['nl', 'Neerlandés'], ['pl', 'Polaco'], ['uk', 'Ucraniano'], ['tr', 'Turco'], ['vi', 'Vietnamita'], ['th', 'Tailandés'],
+  ['id', 'Indonesio'], ['ms', 'Malayo'], ['fil', 'Filipino'], ['bn', 'Bengalí'], ['ur', 'Urdu'], ['fa', 'Persa'], ['sw', 'Suajili'],
+  ['sv', 'Sueco'], ['da', 'Danés'], ['no', 'Noruego'], ['fi', 'Finés'],
+  ['cs', 'Checo'], ['sk', 'Eslovaco'], ['sl', 'Esloveno'], ['hr', 'Croata'], ['hu', 'Húngaro'], ['ro', 'Rumano'], ['bg', 'Búlgaro'],
+  ['el', 'Griego'], ['lt', 'Lituano'], ['iw', 'Hebreo'], ['ta', 'Tamil'], ['te', 'Telugu'], ['kn', 'Canarés'], ['mr', 'Maratí'],
+];
+for (const [code, name] of LANGS) $('target').add(new Option(name, code));
+const ONLINE_CODE = { zh: 'zh-CN', 'zh-Hant': 'zh-TW', fil: 'tl' };
+let googleOffUntil = 0; // si Google limita (429) o falla, 5 min directos a la reserva
 async function translateOnline(text) {
-  const tl = S.target;
+  const tl = encodeURIComponent(ONLINE_CODE[S.target] || S.target);
   try {
+    if (Date.now() < googleOffUntil) throw new Error('en pausa');
     const r = await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl=ja&tl=' + tl + '&dt=t&q=' + encodeURIComponent(text));
-    if (!r.ok) throw new Error('HTTP ' + r.status);
+    if (!r.ok) { googleOffUntil = Date.now() + 300000; throw new Error('HTTP ' + r.status); }
     const j = await r.json();
     const out = (j && j[0] || []).map((s) => s && s[0] || '').join('').trim();
     if (out) return out;
